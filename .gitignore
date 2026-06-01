@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# App data — runtime DB and harness run logs (never commit)
+data/*.db
+data/*.sqlite3
+data/logs/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Keep the data dir in git but not its contents
+!data/.gitkeep
