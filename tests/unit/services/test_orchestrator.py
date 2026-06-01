@@ -17,6 +17,7 @@ from app.domain.models import (
     AuthorKind,
     HumanAuthor,
     Persona,
+    PersonaSession,
     Provider,
     ReplyMode,
     Room,
@@ -106,6 +107,28 @@ class _AwaitingBackend:
     async def send_command(self, session_id: str, command: str):  # type: ignore[no-untyped-def]
         raise NotImplementedError
         yield  # pragma: no cover
+
+
+class _ControlRaisingBackend:
+    """A backend whose ``send_command`` yields one delta then raises a typed
+    harness error mid-stream — to exercise the send_control error branch.
+    """
+
+    name = "control-raising"
+    supported_commands: set[str] = {"/compact", "/clear"}
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.calls: list[tuple[str, str]] = []
+
+    async def run(self, spec: RunSpec):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+        yield  # pragma: no cover
+
+    async def send_command(self, session_id: str, command: str):  # type: ignore[no-untyped-def]
+        self.calls.append((session_id, command))
+        yield TextDelta(text="partial-before-boom")
+        raise self._exc
 
 
 @pytest.fixture
@@ -694,6 +717,62 @@ async def test_send_control_unknown_persona_raises_session_not_found(orch, repos
 
     with pytest.raises(SessionNotFound):
         await _drain_events(orch.send_control(room.id, "ghost", "/compact"))
+
+
+@pytest.mark.asyncio
+async def test_send_control_mid_stream_error_yields_runerror_and_preserves_session(
+    repos, room, run_log, persona_a
+):
+    """Mid-stream backend error in send_control: a terminal RunError is YIELDED
+    (not raised), the RunRecord is finalized with error_kind + exit_code 1, and
+    the existing PersonaSession is left untouched (success-path upsert skipped).
+    """
+    from app.config.logging import run_id_var
+    from app.domain.errors import HarnessTimeout
+
+    backend = _ControlRaisingBackend(HarnessTimeout("boom"))
+    reg = BackendRegistry()
+    reg.register(Provider.CLAUDE, backend)  # persona_a -> CLAUDE
+    orch = _orch_with_registry(repos, run_log, reg)
+
+    # Seed an EXISTING live session so pre-run validation passes and we reach
+    # the streaming path.
+    repos["session"].upsert(
+        PersonaSession(
+            room_id=room.id,
+            persona_id=persona_a.id,
+            provider=Provider.CLAUDE,
+            harness_session_id="sess-original",
+            last_seen_message_id=None,
+            status="idle",
+        )
+    )
+
+    # 1. The terminal RunError is YIELDED, not raised.
+    events = [ev async for ev in orch.send_control(room.id, persona_a.id, "/compact")]
+    assert backend.calls == [("sess-original", "/compact")]
+    run_errors = [ev for ev in events if isinstance(ev, RunError)]
+    assert len(run_errors) == 1
+    assert run_errors[0].error_kind == "HarnessTimeout"
+    # the partial delta emitted before the boom was also streamed
+    assert any(isinstance(ev, TextDelta) for ev in events)
+
+    # 2. The RunRecord is finalized with error_kind set + exit_code == 1.
+    rows = repos["run"]._db.query(  # type: ignore[attr-defined]
+        "SELECT * FROM run_record WHERE command_redacted LIKE '%control /compact%'"
+    )
+    assert len(rows) == 1
+    assert rows[0]["error_kind"] == "HarnessTimeout"
+    assert rows[0]["exit_code"] == 1
+    assert rows[0]["finished_at"] is not None
+
+    # 3. The PersonaSession is unchanged (success-path upsert was skipped).
+    session_after = repos["session"].get(room.id, persona_a.id)
+    assert session_after is not None
+    assert session_after.harness_session_id == "sess-original"
+
+    # 4. run_id_var was reset back to None.
+    assert run_id_var.get() is None
 
 
 async def _drain_events(agen):
