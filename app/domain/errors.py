@@ -19,6 +19,14 @@ class HarnessAuthError(HarnessError):
     pass
 
 
+class NotFound(TeamError):
+    """A requested resource (persona/room/author/run/log) does not exist.
+
+    Mapped to HTTP 404. Distinct from :class:`TranscriptError`, whose message may
+    also contain "not found" but signals a stale-cursor/data-integrity conflict.
+    """
+
+
 class SessionNotFound(TeamError):
     pass
 

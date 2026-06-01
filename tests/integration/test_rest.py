@@ -229,10 +229,69 @@ def test_run_log_unknown_404(client):
     assert client.get("/runs/nope/log").status_code == 404
 
 
+def test_run_log_path_outside_logs_dir_404(client, tmp_path):
+    """A log_path pointing OUTSIDE the configured logs dir must 404, not serve."""
+    from datetime import UTC, datetime
+
+    from app.domain.models import RunRecord
+
+    # A real, readable file but located outside resolved_logs_dir.
+    outside = tmp_path / "escape.jsonl"
+    outside.write_text('{"x": 1}\n', encoding="utf-8")
+
+    runs = client.app.state.services.runs
+    runs.create(
+        RunRecord(
+            run_id="run-escape",
+            room_id="room1",
+            persona_id="persona1",
+            command_redacted="mock",
+            log_path=str(outside),
+            started_at=datetime.now(UTC),
+        )
+    )
+
+    resp = client.get("/runs/run-escape/log")
+    assert resp.status_code == 404
+    assert resp.json()["error"]["kind"] == "NotFound"
+
+
 # -- error mapping -----------------------------------------------------------
 
 
 def test_missing_persona_maps_to_404(client):
     resp = client.get("/personas/does-not-exist")
     assert resp.status_code == 404
-    assert resp.json()["error"]["kind"] == "TeamError"
+    # Now classified by type, not message substring.
+    assert resp.json()["error"]["kind"] == "NotFound"
+
+
+def test_error_body_only_exposes_kind_and_message(client):
+    resp = client.get("/personas/does-not-exist")
+    assert resp.status_code == 404
+    body = resp.json()
+    assert set(body) == {"error"}
+    assert set(body["error"]) == {"kind", "message"}  # no stack trace leaked
+
+
+# -- lifespan ----------------------------------------------------------------
+
+
+def test_lifespan_closes_db_and_seeds_within_context(test_settings, registry, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(health_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    app = create_app(test_settings, registry=registry)
+
+    with TestClient(app) as client:
+        # Startup seeding visible inside the lifespan context.
+        names = {a["name"] for a in client.get("/authors").json()}
+        assert {"Me", "Boss"} <= names
+
+    # After the context exits, the lifespan shutdown closed the connection.
+    import sqlite3
+
+    import pytest
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        app.state.db.query("SELECT 1")

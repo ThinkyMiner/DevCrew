@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import builtins
 
-from app.domain.errors import TeamError
+from app.domain.errors import NotFound
 from app.domain.models import Persona, Room
 from app.persistence.repositories import PersonaRepo, RoomRepo
 
@@ -35,7 +35,7 @@ class RoomService:
     def get(self, room_id: str) -> Room:
         room = self._rooms.get(room_id)
         if room is None:
-            raise TeamError(f"room not found: {room_id}")
+            raise NotFound(f"room not found: {room_id}")
         return room
 
     def list(self) -> builtins.list[Room]:

@@ -20,7 +20,7 @@ from __future__ import annotations
 import builtins
 from dataclasses import dataclass
 
-from app.domain.errors import TeamError
+from app.domain.errors import NotFound
 from app.domain.models import HumanAuthor
 from app.persistence.repositories import AuthorRepo
 
@@ -50,7 +50,7 @@ class AuthorService:
     def get(self, author_id: str) -> HumanAuthor:
         author = self._repo.get(author_id)
         if author is None:
-            raise TeamError(f"author not found: {author_id}")
+            raise NotFound(f"author not found: {author_id}")
         return author
 
     def list(self) -> builtins.list[HumanAuthor]:

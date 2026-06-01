@@ -17,6 +17,9 @@ routes raise/let domain errors propagate and never hand-build error JSON.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -31,7 +34,12 @@ from app.api.deps import Services
 from app.api.health import HealthReport, check_health
 from app.config.logging import configure_logging
 from app.config.settings import Settings, default_settings
-from app.domain.errors import ProviderUnavailable, TeamError
+from app.domain.errors import (
+    NotFound,
+    ProviderUnavailable,
+    TeamError,
+    TranscriptError,
+)
 from app.harness.registry import BackendRegistry, default_registry
 from app.persistence.db import Database
 from app.persistence.repositories import (
@@ -51,17 +59,20 @@ from app.services.session_store import SessionStore
 
 
 def _status_for(error: TeamError) -> int:
-    """Map a TeamError to an HTTP status.
+    """Map a TeamError to an HTTP status BY TYPE (never by message substring).
 
-    Not-found is signaled by the service facades as a base ``TeamError`` whose
-    message contains "not found" (there is no dedicated NotFound subclass), so we
-    detect it by message. ``ProviderUnavailable`` -> 503; any other TeamError is a
-    bad request -> 400.
+    - :class:`NotFound` -> 404 (missing resource).
+    - :class:`ProviderUnavailable` -> 503 (backend CLI unavailable).
+    - :class:`TranscriptError` -> 409 (stale-cursor / data-integrity conflict;
+      its message may contain "not found" but it is NOT a missing resource).
+    - any other :class:`TeamError` -> 400 (bad request).
     """
+    if isinstance(error, NotFound):
+        return 404
     if isinstance(error, ProviderUnavailable):
         return 503
-    if "not found" in str(error).lower():
-        return 404
+    if isinstance(error, TranscriptError):
+        return 409
     return 400
 
 
@@ -109,7 +120,17 @@ def create_app(
     # Seed default authors (FR-A1/A3) at startup; idempotent.
     author_service.ensure_defaults()
 
-    app = FastAPI(title="Team")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Startup work already happened eagerly above (schema + seeding) so a
+        # bare TestClient still sees a ready app; here we only register the
+        # shutdown hook that releases the sqlite connection (no resource leak).
+        try:
+            yield
+        finally:
+            db.close()
+
+    app = FastAPI(title="Team", lifespan=lifespan)
     app.state.db = db
     app.state.registry = backend_registry
     app.state.session_store = session_store

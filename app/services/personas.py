@@ -22,7 +22,7 @@ import builtins
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from app.domain.errors import TeamError
+from app.domain.errors import NotFound, TeamError
 from app.domain.models import Persona
 from app.persistence.repositories import PersonaRepo
 
@@ -40,7 +40,7 @@ class PersonaService:
         """Return the persona or raise — callers want a value, not ``None``."""
         persona = self._repo.get(persona_id)
         if persona is None:
-            raise TeamError(f"persona not found: {persona_id}")
+            raise NotFound(f"persona not found: {persona_id}")
         return persona
 
     def list(self) -> builtins.list[Persona]:
