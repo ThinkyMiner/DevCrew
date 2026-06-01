@@ -259,7 +259,12 @@ class ClaudeHarness:
         if spec.working_dir:
             argv += ["--add-dir", spec.working_dir]
         argv += self._mcp_args(spec.mcp_servers)
-        argv.append(prompt)
+        # End-of-options separator (C1): the prompt is a trailing positional, so a
+        # prompt beginning with "-" (e.g. "--version") would otherwise be parsed
+        # as a flag. "--" forces everything after it to be treated as positional
+        # prompt text (standard CLI semantics; verified: `claude --print -- "..."`
+        # treats the text as the prompt).
+        argv += ["--", prompt]
         return argv
 
     def _resume_argv(self, session_id: str, command: str) -> list[str]:
@@ -271,6 +276,9 @@ class ClaudeHarness:
             "--verbose",
             "--resume",
             session_id,
+            # End-of-options separator (C1): guards the command positional so it
+            # cannot be parsed as a flag, matching _build_argv.
+            "--",
             command,
         ]
 

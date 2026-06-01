@@ -20,9 +20,15 @@ Real interface (codex-cli 0.130.0, verified locally 2026-06):
 * Model: ``-m/--model``. Working root: ``-C/--cd`` (+ also passed as the spawn
   ``cwd``). Extra writable dirs: ``--add-dir``.
 * Sandbox / permission: ``-s/--sandbox {read-only,workspace-write,
-  danger-full-access}`` plus ``-a/--ask-for-approval`` (only on the top-level
-  ``codex`` command, not ``codex exec`` — exec uses ``-c`` overrides). We map
-  :class:`PermissionMode` -> sandbox mode and a non-interactive approval policy.
+  danger-full-access}``. We map :class:`PermissionMode` -> sandbox mode (see
+  ``_SANDBOX_FOR_MODE``: READ_ONLY and ASK both -> ``read-only``, AUTO ->
+  ``workspace-write``). ``-a/--ask-for-approval`` exists ONLY on the top-level
+  ``codex`` command, not on ``codex exec``; exec configures the approval policy
+  via a ``-c`` override. We pin ``-c approval_policy=never`` explicitly so the
+  non-interactive posture is self-documenting and robust to a default change
+  (verified against codex-cli 0.130.0: the run banner reports
+  ``approval: never``). Because exec cannot prompt a human, ASK maps to the
+  conservative read-only sandbox rather than silently granting writes (I1).
 * Reasoning effort: there is no ``--effort`` flag; Codex takes it via the config
   override ``-c model_reasoning_effort=<low|medium|high|xhigh>``.
 * System prompt / instructions: Codex has no inline ``--append-system-prompt``.
@@ -79,9 +85,17 @@ _STDOUT_LINE_LIMIT = 8 * 1024 * 1024
 _REDACTED = "[REDACTED]"
 
 # Map our permission model onto Codex's sandbox mode.
+#
+# I1 — ASK maps to read-only, NOT workspace-write. `codex exec` runs strictly
+# non-interactively (we pin approval_policy=never below): there is no human in
+# the loop to approve a write, so granting workspace-write under ASK would
+# silently hand out write access nobody approved. Conservative rule: "can't ask
+# -> don't allow writes." This is a DELIBERATE cross-backend divergence — the
+# Claude CLI passes `--permission-mode ask` through to a CLI that CAN actually
+# prompt, so ASK there is meaningfully different; `codex exec` cannot prompt.
 _SANDBOX_FOR_MODE = {
     PermissionMode.READ_ONLY: "read-only",
-    PermissionMode.ASK: "workspace-write",
+    PermissionMode.ASK: "read-only",
     PermissionMode.AUTO: "workspace-write",
 }
 
@@ -238,9 +252,23 @@ class CodexHarness:
 
     # -- argv construction ------------------------------------------------------
 
+    def _base_flags(self) -> list[str]:
+        """Static, spec-independent flags applied to every codex exec invocation.
+
+        Includes the non-interactive security pin so it is present even on argv
+        builders that have no :class:`RunSpec` (e.g. ``send_command`` — M2).
+        """
+        # Pin the approval policy explicitly so the non-interactive security
+        # posture is self-documenting and robust to a change in exec's default.
+        # `-a/--ask-for-approval` is NOT accepted by `codex exec` (top-level
+        # `codex` only); the supported route on exec is the `-c` config override
+        # `approval_policy=never` (verified against codex-cli 0.130.0: the run
+        # banner reports `approval: never`).
+        return ["--json", "--skip-git-repo-check", "-c", "approval_policy=never"]
+
     def _common_flags(self, spec: RunSpec) -> list[str]:
         """Flags shared by initial-run and resume invocations."""
-        flags: list[str] = ["--json", "--skip-git-repo-check"]
+        flags: list[str] = self._base_flags()
         flags += ["--model", spec.model]
         flags += ["--sandbox", _SANDBOX_FOR_MODE.get(spec.permission_mode, "read-only")]
         if spec.working_dir:
@@ -260,17 +288,23 @@ class CodexHarness:
 
     def _build_argv(self, spec: RunSpec, prompt: str) -> list[str]:
         if spec.resume_session_id:
-            # `codex exec resume <SESSION_ID> [PROMPT]` — flags go before the
-            # subcommand args.
+            # `codex exec resume <SESSION_ID> -- [PROMPT]` — flags go before the
+            # subcommand args. The literal "--" (C1) marks end-of-options so a
+            # prompt beginning with "-" (e.g. "--version", "-c sandbox=...") is
+            # treated as prompt text, never parsed as a flag/config override.
+            # Verified against codex-cli 0.130.0: `codex exec ... -- "--version"`
+            # runs the agent with that text as the prompt instead of printing
+            # the version.
             return [
                 self._codex_bin,
                 "exec",
                 *self._common_flags(spec),
                 "resume",
                 spec.resume_session_id,
+                "--",
                 prompt,
             ]
-        return [self._codex_bin, "exec", *self._common_flags(spec), prompt]
+        return [self._codex_bin, "exec", *self._common_flags(spec), "--", prompt]
 
     # -- streaming core ---------------------------------------------------------
 
@@ -350,15 +384,22 @@ class CodexHarness:
             )
         # Unreachable today (supported_commands is empty — TODO(OQ-1)); kept for
         # symmetry with the Claude adapter's contract. If/when Codex exposes a
-        # non-interactive compaction command, resume the session and pass it as
-        # the prompt.
+        # non-interactive compaction command this activates.
+        #
+        # M2: build from the same _base_flags() helper as run() (no RunSpec is
+        # available here, so spec-derived --sandbox/--model/--cd can't be set —
+        # but the security pin and stream flags stay aligned) and reuse the same
+        # resume + end-of-options "--" guard so the command positional can never
+        # be parsed as a flag. TODO(OQ-1): this path goes live only once a
+        # verified non-interactive command mechanism exists; revisit threading a
+        # RunSpec through so --sandbox/--model/--cd match run() exactly.
         argv = [
             self._codex_bin,
             "exec",
-            "--json",
-            "--skip-git-repo-check",
+            *self._base_flags(),
             "resume",
             session_id,
+            "--",
             command,
         ]
         inner = self._stream(argv, None, session_id)

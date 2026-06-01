@@ -138,6 +138,31 @@ async def test_run_resume_adds_resume_flag() -> None:
     assert argv[argv.index("--resume") + 1] == "prev-sess"
 
 
+async def test_run_prompt_preceded_by_end_of_options_separator() -> None:
+    # C1: a prompt that looks like a flag must NOT be parsed as one. The prompt
+    # must be the last element, immediately preceded by a literal "--".
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = ClaudeHarness(spawn=spawn)
+    await _collect(h.run(_spec("--version")))
+    argv = spawn.argv
+    assert argv is not None
+    assert argv[-1] == "--version"
+    assert argv[-2] == "--"
+    sep = argv.index("--")
+    assert "--version" not in argv[:sep]
+
+
+async def test_run_resume_prompt_preceded_by_end_of_options_separator() -> None:
+    # C1 (resume path): the prompt positional is guarded on resume runs too.
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = ClaudeHarness(spawn=spawn)
+    await _collect(h.run(_spec("--version", resume_session_id="prev-sess")))
+    argv = spawn.argv
+    assert argv is not None
+    assert argv[-1] == "--version"
+    assert argv[-2] == "--"
+
+
 async def test_run_no_optional_flags_when_unset() -> None:
     spawn = FakeSpawn(FakeProc(_fixture_lines()))
     h = ClaudeHarness(spawn=spawn)
@@ -244,7 +269,9 @@ async def test_send_command_supported_builds_resume_argv_and_streams() -> None:
     argv = spawn.argv
     assert argv is not None
     assert argv[argv.index("--resume") + 1] == "sess-abc123"
+    # C1: the slash command (a positional) is guarded by the separator too.
     assert argv[-1] == "/compact"
+    assert argv[-2] == "--"
     assert isinstance(events[-1], RunDone)
     assert events[-1].session_id == "sess-abc123"
 

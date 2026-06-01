@@ -137,17 +137,72 @@ async def test_run_read_only_maps_to_read_only_sandbox() -> None:
     assert argv[argv.index("--sandbox") + 1] == "read-only"
 
 
+async def test_run_ask_maps_to_read_only_sandbox() -> None:
+    # I1: codex exec is non-interactive (approval never) — there is no human to
+    # approve writes, so ASK must NOT silently grant workspace-write. Conservative:
+    # "can't ask -> don't allow writes". (Diverges from the Claude adapter, which
+    # CAN pass --permission-mode ask through to an interactive prompt.)
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = CodexHarness(spawn=spawn)
+    await _collect(h.run(_spec(permission_mode=PermissionMode.ASK)))
+    argv = spawn.argv
+    assert argv is not None
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+
+
+async def test_run_sets_explicit_never_approval_policy() -> None:
+    # I2: security posture is self-documenting — explicitly pin the non-interactive
+    # approval policy rather than relying on the exec default.
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = CodexHarness(spawn=spawn)
+    await _collect(h.run(_spec()))
+    argv = spawn.argv
+    assert argv is not None
+    assert "approval_policy=never" in argv
+
+
+async def test_run_prompt_preceded_by_end_of_options_separator() -> None:
+    # C1: a prompt that looks like a flag must NOT be parsed as one. The prompt
+    # must be the last element, immediately preceded by a literal "--".
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = CodexHarness(spawn=spawn)
+    await _collect(h.run(_spec("--version")))
+    argv = spawn.argv
+    assert argv is not None
+    assert argv[-1] == "--version"
+    assert argv[-2] == "--"
+    # "--version" appears only after the separator, never as a parsed flag.
+    sep = argv.index("--")
+    assert "--version" not in argv[:sep]
+
+
+async def test_run_resume_prompt_preceded_by_end_of_options_separator() -> None:
+    # C1 (resume path): same guard for `codex exec ... resume <id> -- <prompt>`.
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = CodexHarness(spawn=spawn)
+    await _collect(h.run(_spec("--version", resume_session_id="thread-xyz")))
+    argv = spawn.argv
+    assert argv is not None
+    assert argv[-1] == "--version"
+    assert argv[-2] == "--"
+    ri = argv.index("resume")
+    assert argv[ri + 1] == "thread-xyz"
+    assert argv[ri + 2] == "--"
+    assert argv[ri + 3] == "--version"
+
+
 async def test_run_resume_builds_resume_subcommand() -> None:
     spawn = FakeSpawn(FakeProc(_fixture_lines()))
     h = CodexHarness(spawn=spawn)
     await _collect(h.run(_spec("again", resume_session_id="thread-xyz")))
     argv = spawn.argv
     assert argv is not None
-    # `codex exec ... resume <id> <prompt>`
+    # `codex exec ... resume <id> -- <prompt>`
     assert "resume" in argv
     ri = argv.index("resume")
     assert argv[ri + 1] == "thread-xyz"
-    assert argv[ri + 2] == "again"
+    assert argv[ri + 2] == "--"
+    assert argv[ri + 3] == "again"
     assert argv[-1] == "again"
 
 
@@ -267,7 +322,10 @@ async def test_send_command_supported_streams_when_registered() -> None:
     assert "resume" in argv
     ri = argv.index("resume")
     assert argv[ri + 1] == "thread-1"
+    # C1/M2: command (a positional) is guarded by the end-of-options separator.
+    assert argv[ri + 2] == "--"
     assert argv[-1] == "/compact"
+    assert argv[-2] == "--"
     assert isinstance(events[-1], RunDone)
     assert events[-1].session_id == "019e848c-7d27-7b53-bc90-1230355e8f87"
 
