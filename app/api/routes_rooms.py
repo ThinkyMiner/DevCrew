@@ -6,14 +6,16 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from app.api.deps import get_room_service
+from app.api.deps import get_room_service, get_session_store
 from app.api.schemas import MemberAdd, RoomCreate, RoomUpdate
-from app.domain.models import Persona, Room
+from app.domain.models import Persona, PersonaSession, Room
 from app.services.rooms import RoomService
+from app.services.session_store import SessionStore
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
 
 ServiceDep = Annotated[RoomService, Depends(get_room_service)]
+SessionStoreDep = Annotated[SessionStore, Depends(get_session_store)]
 
 
 @router.post("", status_code=201)
@@ -64,3 +66,23 @@ def add_member(room_id: str, body: MemberAdd, service: ServiceDep) -> list[Perso
 def remove_member(room_id: str, persona_id: str, service: ServiceDep) -> None:
     service.get(room_id)  # 404 if room missing
     service.remove_member(room_id, persona_id)
+
+
+# -- session reset (FR-C4) ------------------------------------------------
+
+
+@router.post("/{room_id}/personas/{persona_id}/reset-session")
+def reset_session(
+    room_id: str,
+    persona_id: str,
+    service: ServiceDep,
+    sessions: SessionStoreDep,
+) -> PersonaSession:
+    """Clear a persona's harness session in this room (FR-C4).
+
+    Thin delegate to :meth:`SessionStore.reset_session`: the next turn finds no
+    resume id and starts a fresh harness session. The UI owns the confirmation
+    prompt before calling this.
+    """
+    service.get(room_id)  # 404 if room missing
+    return sessions.reset_session(room_id, persona_id)

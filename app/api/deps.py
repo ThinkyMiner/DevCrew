@@ -18,6 +18,7 @@ from app.persistence.run_log import RunLogStore
 from app.services.authors import AuthorService
 from app.services.personas import PersonaService
 from app.services.rooms import RoomService
+from app.services.session_store import SessionStore
 
 
 @dataclass
@@ -61,3 +62,8 @@ def get_message_repo(request: Request) -> MessageRepo:
 
 def get_run_repo(request: Request) -> RunRepo:
     return get_services(request).runs
+
+
+def get_session_store(request: Request) -> SessionStore:
+    store: SessionStore = request.app.state.session_store
+    return store

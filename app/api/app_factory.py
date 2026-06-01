@@ -19,9 +19,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api import (
     routes_authors,
@@ -157,9 +159,17 @@ def create_app(
     def health() -> HealthReport:
         return check_health(settings)
 
-    @app.get("/")
-    def index() -> dict[str, str]:
-        return {"app": "team", "status": "ok"}
+    # Buildless web frontend (Phase 6). The browser UI is plain ES-module JS +
+    # CSS served as static files — no bundler, no Node, no CDN deps (NFR-2).
+    # Assets are mounted under ``/static`` so the mount does NOT shadow the REST
+    # routers, ``/health``, or the ``/ws`` endpoint; ``GET /`` returns the SPA
+    # shell (index.html) directly.
+    web_dir = Path(__file__).resolve().parent.parent / "web"
+    index_html = web_dir / "index.html"
+
+    @app.get("/", include_in_schema=False)
+    def index() -> FileResponse:
+        return FileResponse(index_html, media_type="text/html")
 
     app.include_router(routes_personas.router)
     app.include_router(routes_authors.router)
@@ -168,5 +178,8 @@ def create_app(
     app.include_router(routes_runs.router)
 
     ws.register_ws(app)
+
+    # Mount LAST so the explicit routers/routes above take precedence.
+    app.mount("/static", StaticFiles(directory=web_dir), name="static")
 
     return app
