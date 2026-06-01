@@ -46,18 +46,23 @@ interleaving.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncGenerator
+from itertools import count
 from typing import cast
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from app.api.deps import Services
-from app.config.logging import run_id_var
 from app.domain.errors import TeamError
 from app.domain.events import RunDone, RunError, StreamEvent
 from app.domain.models import HumanAuthor, ReplyMode
 from app.services.orchestrator import ChatOrchestrator
 from app.services.session_store import SessionStore
+
+_BAD_FRAME = object()
+"""Sentinel returned by ``_receive_frame`` when an inbound frame was malformed and
+a ``BadFrame`` error frame was already sent; tells ``serve`` to keep looping."""
 
 
 def register_ws(app: FastAPI) -> None:
@@ -89,17 +94,48 @@ class _RoomConnection:
         self._services = services
         self._orch = orchestrator
         self._sessions = session_store
+        # Monotonic source of WS-local activity tokens (see _track_start). NOT the
+        # orchestrator's run_id — purely an opaque id so mark_active/mark_done stay
+        # balanced regardless of which task the orchestrator runs the turn on.
+        self._activity_seq = count()
 
     async def serve(self) -> None:
         try:
             while True:
-                frame = await self._ws.receive_json()
+                # Serialization invariant: each inbound frame is fully drained
+                # (its orchestrator drive awaited to completion in _dispatch)
+                # BEFORE the next frame is read here. A single socket therefore
+                # never drives two overlapping orchestrator runs — the
+                # no-concurrent-drive guarantee is intentional, not incidental.
+                frame = await self._receive_frame()
+                if frame is _BAD_FRAME:
+                    continue  # BadFrame error already sent; keep the socket open
                 await self._dispatch(frame)
         except WebSocketDisconnect:
-            # Client went away (possibly mid-stream). _stream_post/_stream_command
+            # Client went away (possibly mid-stream). _handle_post/_handle_command
             # run their own try/finally that aclose()s the orchestrator generator,
             # so in-flight harness subprocesses are reaped; nothing to do here.
             return
+
+    async def _receive_frame(self) -> object:
+        """Read and JSON-decode one inbound frame.
+
+        Guards against malformed/binary frames (C1): a non-JSON text frame
+        (json.JSONDecodeError / ValueError), a binary frame (KeyError on
+        ``message['text']``), or invalid UTF-8 (UnicodeDecodeError) must NOT tear
+        down the socket. On any of these we send a ``BadFrame`` error frame and
+        return a sentinel so the serve loop continues. WebSocketDisconnect is left
+        to propagate as the clean exit.
+        """
+        try:
+            message = await self._ws.receive()
+            if message.get("type") == "websocket.disconnect":
+                raise WebSocketDisconnect(message.get("code", 1000))
+            text = message["text"]  # KeyError if a binary frame ("bytes" only)
+            return json.loads(text)
+        except (json.JSONDecodeError, KeyError, UnicodeDecodeError, ValueError):
+            await self._error("BadFrame", "frame must be a UTF-8 JSON text message")
+            return _BAD_FRAME
 
     async def _dispatch(self, frame: object) -> None:
         if not isinstance(frame, dict):
@@ -139,24 +175,28 @@ class _RoomConnection:
                 quoted_ids=quoted_ids,
             ),
         )
-        # Best-effort in-flight tracking (FR): the orchestrator hides per-turn
-        # boundaries, so we derive activity from the stream. The orchestrator runs
-        # in THIS task and sets ``run_id_var`` per turn, so on the first event for a
-        # persona we read the current run_id and mark_active; a terminal RunDone/
-        # RunError (which now carries its run_id) marks it done. Personas left
-        # active by an early disconnect are cleared in the finally as a backstop.
-        active: dict[str, str | None] = {}
+        # In-flight tracking (FR): the orchestrator hides per-turn boundaries, so we
+        # derive activity from the stream (see _track_start) — works in BOTH
+        # sequential and parallel. Personas left active by an early disconnect are
+        # cleared in the finally as a backstop.
+        active: dict[str, str] = {}
         try:
             async for persona_id, event in stream:
                 self._track_start(active, persona_id)
                 if isinstance(event, RunError):
-                    self._track_end(active, persona_id, event.run_id)
+                    self._track_end(active, persona_id)
                     await self._send_error_card(persona_id, event)
                     continue
                 if isinstance(event, RunDone):
-                    self._track_end(active, persona_id, event.run_id)
+                    self._track_end(active, persona_id)
                 await self._send_event(persona_id, event)
             await self._ws.send_json({"type": "turn_complete"})
+        except TeamError as exc:
+            # Symmetric with _handle_command (I1): post_message does synchronous repo
+            # work BEFORE its first yield, so a TeamError raised pre-yield would
+            # otherwise escape to serve() (which only catches WebSocketDisconnect)
+            # and tear down the socket. Convert it to an {type:error} frame instead.
+            await self._error(exc.kind, str(exc))
         except WebSocketDisconnect:
             raise
         finally:
@@ -175,16 +215,16 @@ class _RoomConnection:
             "AsyncGenerator[StreamEvent, None]",
             self._orch.send_control(self._room_id, persona_id, command),
         )
-        active: dict[str, str | None] = {}
+        active: dict[str, str] = {}
         try:
             async for event in stream:
                 self._track_start(active, persona_id)
                 if isinstance(event, RunError):
-                    self._track_end(active, persona_id, event.run_id)
+                    self._track_end(active, persona_id)
                     await self._send_error_card(persona_id, event)
                     continue
                 if isinstance(event, RunDone):
-                    self._track_end(active, persona_id, event.run_id)
+                    self._track_end(active, persona_id)
                 await self._send_event(persona_id, event)
             await self._ws.send_json({"type": "command_complete"})
         except TeamError as exc:
@@ -198,31 +238,31 @@ class _RoomConnection:
 
     # -- in-flight tracking heuristic --------------------------------------- #
 
-    def _track_start(self, active: dict[str, str | None], persona_id: str) -> None:
+    def _track_start(self, active: dict[str, str], persona_id: str) -> None:
+        # Derive activity PURELY from the event stream, mode-independently (I2). We
+        # do NOT read run_id_var: in PARALLEL the orchestrator runs each turn in a
+        # child task where run_id_var is set, invisible to this (parent) connection
+        # task — so depending on it skipped mark_active in parallel. Instead, on the
+        # FIRST event seen for a persona we mint a WS-local activity token and
+        # mark_active with it; the matching terminal event marks_done the SAME token.
         if persona_id in active:
             return
-        # run_id_var is set by the orchestrator for the in-flight turn (same task).
-        run_id = run_id_var.get()
-        active[persona_id] = run_id
-        if run_id is not None:
-            self._sessions.mark_active(self._room_id, persona_id, run_id)
+        token = f"{persona_id}#{next(self._activity_seq)}"
+        active[persona_id] = token
+        self._sessions.mark_active(self._room_id, persona_id, token)
 
-    def _track_end(
-        self, active: dict[str, str | None], persona_id: str, run_id: str | None
-    ) -> None:
-        # Prefer the run_id stamped on the terminal event; fall back to the one we
-        # recorded at start so mark_active/mark_done stay balanced.
-        end_id = run_id if run_id is not None else active.get(persona_id)
-        if end_id is not None:
-            self._sessions.mark_done(self._room_id, persona_id, end_id)
-        active.pop(persona_id, None)
+    def _track_end(self, active: dict[str, str], persona_id: str) -> None:
+        # Balance mark_active with the SAME token recorded at start (opaque to the
+        # store — it only powers the boolean is_busy / active_runs).
+        token = active.pop(persona_id, None)
+        if token is not None:
+            self._sessions.mark_done(self._room_id, persona_id, token)
 
-    def _clear_active(self, active: dict[str, str | None]) -> None:
+    def _clear_active(self, active: dict[str, str]) -> None:
         # Backstop: any persona still marked active (e.g. early disconnect mid-turn)
-        # is released so is_busy never sticks on.
-        for persona_id, run_id in active.items():
-            if run_id is not None:
-                self._sessions.mark_done(self._room_id, persona_id, run_id)
+        # is released with its stored token so is_busy never sticks on.
+        for persona_id, token in active.items():
+            self._sessions.mark_done(self._room_id, persona_id, token)
         active.clear()
 
     # -- outbound frames ---------------------------------------------------- #
