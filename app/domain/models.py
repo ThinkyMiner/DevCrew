@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def _id() -> str:
@@ -42,6 +42,8 @@ _HANDLE_RE = re.compile(r"^[a-z0-9_-]+$")
 
 
 class Persona(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
     id: str = Field(default_factory=_id)
     name: str
     handle: str
@@ -67,6 +69,8 @@ class Persona(BaseModel):
 
 
 class HumanAuthor(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
     id: str = Field(default_factory=_id)
     name: str
     color: str = "#9ee37d"
@@ -75,6 +79,8 @@ class HumanAuthor(BaseModel):
 
 
 class Room(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
     id: str = Field(default_factory=_id)
     name: str
     topic: str = ""
@@ -84,6 +90,8 @@ class Room(BaseModel):
 
 
 class Message(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
     id: str = Field(default_factory=_id)
     room_id: str
     author_kind: AuthorKind
@@ -93,8 +101,15 @@ class Message(BaseModel):
     run_id: str | None = None
     created_at: datetime = Field(default_factory=_now)
 
+    @field_validator("quoted_message_ids")
+    @classmethod
+    def _dedupe_quoted(cls, v: list[str]) -> list[str]:
+        return list(dict.fromkeys(v))
+
 
 class PersonaSession(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
     room_id: str
     persona_id: str
     provider: Provider
@@ -104,6 +119,8 @@ class PersonaSession(BaseModel):
 
 
 class RunRecord(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
     run_id: str = Field(default_factory=_id)
     room_id: str
     persona_id: str

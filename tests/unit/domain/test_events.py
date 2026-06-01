@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from app.domain.events import (
     RunDone,
     RunError,
@@ -23,3 +26,10 @@ def test_parse_dispatches_on_kind():
         parse_event({"kind": "error", "error_kind": "HarnessError", "message": "x"}), RunError
     )
     assert isinstance(parse_event({"kind": "done", "session_id": "s1"}), RunDone)
+
+
+def test_parse_event_rejects_garbage():
+    with pytest.raises(ValidationError):
+        parse_event({"kind": "bogus"})
+    with pytest.raises(ValidationError):
+        parse_event({"kind": "tool_use"})
