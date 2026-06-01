@@ -73,12 +73,27 @@ class MockHarness:
         return self._next_session_id()
 
     def _scripted_for(self, prompt: str) -> list[StreamEvent] | None:
-        for substring, events in self._script.items():
-            if substring in prompt:
-                return events
+        matches = [substring for substring in self._script if substring in prompt]
+        if len(matches) > 1:
+            raise HarnessError(
+                "ambiguous mock script match: prompt contains multiple scripted "
+                f"substrings {sorted(matches)!r} — refusing to silently pick one"
+            )
+        if matches:
+            return self._script[matches[0]]
         return None
 
     async def run(self, spec: RunSpec) -> AsyncIterator[StreamEvent]:
+        """Emit a scripted stream or the default prompt-referencing stream.
+
+        Note: the default-path :class:`Usage` values
+        (``input_tokens``/``output_tokens``/``context_tokens``) are placeholders
+        derived from the current prompt length and are NOT session-cumulative, so
+        tests asserting on the FR-C3 context indicator should script an explicit
+        ``Usage`` rather than rely on these defaults. Scripting is keyed on prompt
+        substring only (not session or persona), so session-aware assertions
+        should use :meth:`last_prompt_for`.
+        """
         self.calls.append(spec)
         session_id = self._resolve_session_id(spec)
 

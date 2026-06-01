@@ -74,6 +74,18 @@ async def test_constructor_script_with_explicit_events() -> None:
     assert events[-1].session_id == "custom-1"
 
 
+async def test_ambiguous_script_match_raises() -> None:
+    # Phase-4 concern: when delta-injection concatenates messages into one
+    # prompt, more than one scripted substring may match. Picking the first
+    # silently is deceptive, so the mock must fail loud instead.
+    h = MockHarness()
+    h.script_reply("persona-A", "A-REPLY")
+    h.script_reply("persona-B", "B-REPLY")
+    spec = _spec("prompt mentioning persona-A and persona-B together")
+    with pytest.raises(HarnessError):
+        await _collect(h.run(spec))
+
+
 async def test_last_prompt_helpers() -> None:
     h = MockHarness()
     await _collect(h.run(_spec("first prompt")))
