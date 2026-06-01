@@ -236,16 +236,29 @@ class ChatOrchestrator:
                         last_usage = event
                     elif isinstance(event, RunDone):
                         captured_session_id = event.session_id
+                        # Stamp the owning run_id onto the terminal event so a
+                        # transport can correlate end-of-turn with this RunRecord.
+                        event = event.model_copy(update={"run_id": run_id})
                     yield event
             except TeamError as exc:
                 error_kind = exc.kind
-                err = RunError(error_kind=exc.kind, message=_redact(str(exc)))
+                err = RunError(
+                    error_kind=exc.kind,
+                    message=_redact(str(exc)),
+                    run_id=run_id,
+                    log_path=str(writer.path),
+                )
                 writer.write_event(err)
                 yield err
                 return
             except Exception as exc:
                 error_kind = type(exc).__name__
-                err = RunError(error_kind=error_kind, message=_redact(str(exc)))
+                err = RunError(
+                    error_kind=error_kind,
+                    message=_redact(str(exc)),
+                    run_id=run_id,
+                    log_path=str(writer.path),
+                )
                 writer.write_event(err)
                 yield err
                 return
@@ -432,6 +445,9 @@ class ChatOrchestrator:
                     elif isinstance(event, RunDone):
                         if event.session_id is not None:
                             captured_session_id = event.session_id
+                        # Stamp the owning run_id onto the terminal event so a
+                        # transport can correlate end-of-turn with this RunRecord.
+                        event = event.model_copy(update={"run_id": run_id})
                     yield (persona.id, event)
             except TeamError as exc:
                 error_kind = exc.kind
@@ -562,7 +578,12 @@ class ChatOrchestrator:
         a short error-marker ``Message`` so the transcript reflects the failure.
         Does not raise — isolation is the caller's contract.
         """
-        event = RunError(error_kind=error_kind, message=message)
+        event = RunError(
+            error_kind=error_kind,
+            message=message,
+            run_id=run_id,
+            log_path=str(writer.path),
+        )
         writer.write_event(event)
         self._messages.create(
             Message(

@@ -40,11 +40,19 @@ class RunError(BaseModel):
     kind: Literal["error"] = "error"
     error_kind: str
     message: str
+    # Additive (Phase 5b): let a transport build an error card + log link without
+    # changing post_message's (persona_id, event) tuple contract. Populated by the
+    # orchestrator when it constructs the RunError; never carries secrets.
+    run_id: str | None = None
+    log_path: str | None = None
 
 
 class RunDone(BaseModel):
     kind: Literal["done"] = "done"
     session_id: str | None = None  # harness session id to persist for resume
+    # Additive (Phase 5b): the run this terminal event belongs to, so a transport
+    # can correlate the end-of-turn with its RunRecord/log.
+    run_id: str | None = None
 
 
 StreamEvent = Annotated[
