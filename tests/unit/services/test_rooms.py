@@ -53,6 +53,27 @@ def test_rename_and_archive(service):
     assert service.archive(r.id, archived=False).archived is False
 
 
+def test_update_edits_all_fields(service):
+    from app.domain.models import ReplyMode
+
+    r = service.create(Room(name="Old"))
+    r.name = "New"
+    r.topic = "A topic"
+    r.default_reply_mode = ReplyMode.PARALLEL
+    r.archived = True
+    updated = service.update(r)
+    assert updated.name == "New"
+    fetched = service.get(r.id)
+    assert fetched.topic == "A topic"
+    assert fetched.default_reply_mode is ReplyMode.PARALLEL
+    assert fetched.archived is True
+
+
+def test_update_missing_raises(service):
+    with pytest.raises(TeamError):
+        service.update(Room(id="ghost", name="X"))
+
+
 def test_list_member_personas_preserves_order(service, personas):
     r = service.create(Room(name="General"))
     a = _persona(personas, "alpha")

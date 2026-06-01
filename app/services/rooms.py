@@ -41,6 +41,17 @@ class RoomService:
     def list(self) -> builtins.list[Room]:
         return self._rooms.list()
 
+    def update(self, room: Room) -> Room:
+        """Persist edits to an existing room row (name/topic/reply-mode/archived).
+
+        Generic counterpart to :meth:`rename` / :meth:`archive` so a single PATCH
+        can edit any combination of fields uniformly. Raises if the room is
+        unknown (consistent with the other facades), so a PATCH on a missing id
+        becomes a not-found rather than a silent no-op.
+        """
+        self.get(room.id)
+        return self._rooms.update(room)
+
     def delete(self, room_id: str) -> None:
         self._rooms.delete(room_id)
 
