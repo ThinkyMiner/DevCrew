@@ -20,3 +20,6 @@ data/logs/
 
 # Keep the data dir in git but not its contents
 !data/.gitkeep
+
+# Tooling caches
+.codetree/
