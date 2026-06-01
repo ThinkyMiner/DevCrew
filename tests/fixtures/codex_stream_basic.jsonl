@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"019e848c-7d27-7b53-bc90-1230355e8f87"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"The user wants me to run a command and report its output."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'echo hello-from-codex'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'echo hello-from-codex'","aggregated_output":"hello-from-codex\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call","server":"filesystem","tool":"read_file","status":"completed","result":"ok"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"It printed hello-from-codex."}}
+{"type":"item.completed","item":{"id":"item_4","type":"error","message":"a non-fatal item-level error occurred"}}
+{"type":"turn.completed","usage":{"input_tokens":66750,"cached_input_tokens":46208,"output_tokens":154,"reasoning_output_tokens":0}}
+{"type":"item.completed","item":{"id":"item_x","type":"todo_list","items":[{"text":"do a thing","completed":false}]}}
