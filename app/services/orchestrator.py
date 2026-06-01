@@ -54,7 +54,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from datetime import UTC, datetime
 
 from app.config.logging import run_id_var
-from app.domain.errors import TeamError, TranscriptError
+from app.domain.errors import HarnessError, SessionNotFound, TeamError, TranscriptError
 from app.domain.events import RunDone, RunError, StreamEvent, TextDelta, Usage
 from app.domain.models import (
     AuthorKind,
@@ -167,6 +167,106 @@ class ChatOrchestrator:
                 yield item
         finally:
             await inner.aclose()
+
+    async def send_control(
+        self, room_id: str, persona_id: str, command: str
+    ) -> AsyncIterator[StreamEvent]:
+        """Run a harness control command (e.g. ``/compact``) against a persona's
+        live session and stream the resulting events (FR-C1/FR-C2).
+
+        Contract / error handling:
+
+        * No persona, or no session with a ``harness_session_id`` yet -> raise
+          :class:`SessionNotFound` (BEFORE any run is recorded): you cannot run a
+          control command against a session that does not exist. This surfaces to
+          the caller as an exception (no run/log is created).
+        * ``command`` not in ``backend.supported_commands`` -> raise
+          :class:`HarnessError` naming the command AND the supported set (FR-C2:
+          never silently no-op). Also surfaces to the caller as an exception.
+        * Otherwise a ``RunRecord`` is opened, the command is streamed, every
+          event is logged + yielded, and the ``RunRecord`` is finalized. A
+          ``RunDone.session_id`` (a ``/compact`` may keep the SAME id; a ``/clear``
+          may change it) is persisted onto the ``PersonaSession`` — whatever the
+          backend returns, including ``None``. The ``last_seen_message_id``
+          pointer is preserved (a control command shows the persona no new
+          transcript).
+        * If the backend RAISES mid-stream, we record it consistently with
+          ``post_message``: yield a terminal ``RunError`` event + finalize the
+          ``RunRecord`` with ``error_kind`` set, and DO NOT re-raise (the stream
+          ends cleanly). The two pre-run validation errors above are the only
+          cases that reach the caller as exceptions.
+        """
+        persona = self._personas.get(persona_id)
+        if persona is None:
+            raise SessionNotFound(f"unknown persona: {persona_id}")
+        session = self._sessions.get(room_id, persona_id)
+        if session is None or session.harness_session_id is None:
+            raise SessionNotFound(
+                f"no live harness session for persona {persona_id} in room {room_id}; "
+                "post a message first to start one"
+            )
+        harness_session_id = session.harness_session_id
+
+        backend = self._registry.get_backend(persona.provider)
+        if command not in backend.supported_commands:
+            raise HarnessError(
+                f"command {command!r} not supported by provider "
+                f"{persona.provider.value!r} (supported: {sorted(backend.supported_commands)})"
+            )
+
+        run = RunRecord(
+            room_id=room_id,
+            persona_id=persona_id,
+            command_redacted=f"{persona.provider.value} control {command} resume=True",
+        )
+        run_id = run.run_id
+        token = run_id_var.set(run_id)
+        writer = self._run_log.open(room_id, persona_id, run_id)
+        run.log_path = str(writer.path)
+        self._runs.create(run)
+
+        captured_session_id: str | None = harness_session_id
+        last_usage: Usage | None = None
+        error_kind: str | None = None
+        try:
+            try:
+                async for event in backend.send_command(harness_session_id, command):
+                    writer.write_event(event)
+                    if isinstance(event, Usage):
+                        last_usage = event
+                    elif isinstance(event, RunDone):
+                        captured_session_id = event.session_id
+                    yield event
+            except TeamError as exc:
+                error_kind = exc.kind
+                err = RunError(error_kind=exc.kind, message=_redact(str(exc)))
+                writer.write_event(err)
+                yield err
+                return
+            except Exception as exc:
+                error_kind = type(exc).__name__
+                err = RunError(error_kind=error_kind, message=_redact(str(exc)))
+                writer.write_event(err)
+                yield err
+                return
+
+            self._sessions.upsert(
+                PersonaSession(
+                    room_id=room_id,
+                    persona_id=persona_id,
+                    provider=persona.provider,
+                    harness_session_id=captured_session_id,
+                    last_seen_message_id=session.last_seen_message_id,
+                    status="idle",
+                )
+            )
+        finally:
+            run.exit_code = 0 if error_kind is None else 1
+            run.error_kind = error_kind
+            run.usage = last_usage.model_dump() if last_usage is not None else {}
+            run.finished_at = datetime.now(UTC)
+            self._runs.finalize(run)
+            run_id_var.reset(token)
 
     # ------------------------------------------------------------------ #
     # routing

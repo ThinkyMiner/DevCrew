@@ -615,3 +615,86 @@ async def test_parallel_one_raises_others_survive_under_concurrency(
 
     contents = [m.content for m in repos["message"].list_for_room(room.id)]
     assert any("BETA" in c for c in contents)
+
+
+# --- Task 4.8: control commands (send_control) ------------------------------ #
+
+
+@pytest.mark.asyncio
+async def test_send_control_supported_command_streams_and_finalizes(
+    orch, repos, room, me, persona_a, mock_a
+):
+    # First post a message so persona_a has a live harness session.
+    await _drain(
+        orch.post_message(room.id, author=me, text="@alpha hi", reply_mode=ReplyMode.SEQUENTIAL)
+    )
+    session_before = repos["session"].get(room.id, persona_a.id)
+    assert session_before is not None and session_before.harness_session_id == "mock-1"
+
+    events = [ev async for ev in orch.send_control(room.id, persona_a.id, "/compact")]
+    # mock emits "[compacted]" then RunDone
+    assert any(isinstance(ev, TextDelta) and "compacted" in ev.text for ev in events)
+    assert any(isinstance(ev, RunDone) for ev in events)
+
+    session_after = repos["session"].get(room.id, persona_a.id)
+    assert session_after is not None
+    # /compact keeps the same session id (mock echoes session_id back)
+    assert session_after.harness_session_id == "mock-1"
+    # pointer preserved (a control command shows no new transcript)
+    assert session_after.last_seen_message_id == session_before.last_seen_message_id
+    # control commands do NOT persist a transcript message
+    assert len(repos["message"].list_for_room(room.id)) == 2
+
+
+@pytest.mark.asyncio
+async def test_send_control_finalized_run_record(orch, repos, room, me, persona_a, mock_a):
+    await _drain(
+        orch.post_message(room.id, author=me, text="@alpha hi", reply_mode=ReplyMode.SEQUENTIAL)
+    )
+    await _drain_events(orch.send_control(room.id, persona_a.id, "/compact"))
+    # the control RunRecord is finalized with exit_code 0
+    rows = repos["run"]._db.query(  # type: ignore[attr-defined]
+        "SELECT * FROM run_record WHERE command_redacted LIKE '%control /compact%'"
+    )
+    assert len(rows) == 1
+    assert rows[0]["exit_code"] == 0
+    assert rows[0]["error_kind"] is None
+    assert rows[0]["finished_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_send_control_unsupported_command_raises_naming_supported(
+    orch, repos, room, me, persona_a, mock_a
+):
+    await _drain(
+        orch.post_message(room.id, author=me, text="@alpha hi", reply_mode=ReplyMode.SEQUENTIAL)
+    )
+    from app.domain.errors import HarnessError
+
+    with pytest.raises(HarnessError) as excinfo:
+        await _drain_events(orch.send_control(room.id, persona_a.id, "/bogus"))
+    msg = str(excinfo.value)
+    assert "/bogus" in msg
+    assert "/compact" in msg and "/clear" in msg  # supported set is listed
+
+
+@pytest.mark.asyncio
+async def test_send_control_no_session_raises_session_not_found(
+    orch, repos, room, me, persona_a, mock_a
+):
+    from app.domain.errors import SessionNotFound
+
+    with pytest.raises(SessionNotFound):
+        await _drain_events(orch.send_control(room.id, persona_a.id, "/compact"))
+
+
+@pytest.mark.asyncio
+async def test_send_control_unknown_persona_raises_session_not_found(orch, repos, room):
+    from app.domain.errors import SessionNotFound
+
+    with pytest.raises(SessionNotFound):
+        await _drain_events(orch.send_control(room.id, "ghost", "/compact"))
+
+
+async def _drain_events(agen):
+    return [ev async for ev in agen]
