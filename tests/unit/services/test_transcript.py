@@ -2,7 +2,7 @@ import pytest
 
 from app.domain.errors import TranscriptError
 from app.domain.models import AuthorKind, Message
-from app.services.transcript import build_delta, render_quotes
+from app.services.transcript import build_delta, delta_messages, render_quotes
 
 
 def _name_of(kind: AuthorKind, ref: str) -> str:
@@ -87,6 +87,33 @@ def test_unknown_pointer_raises_rather_than_dumping_history() -> None:
     ]
     with pytest.raises(TranscriptError) as exc_info:
         build_delta(msgs, "m99", persona_handle="architect", name_of=_name_of)
+    assert "m99" in str(exc_info.value)
+
+
+# --- delta_messages (shared slice; single source of truth) ---------------
+
+
+def test_delta_messages_none_pointer_returns_all() -> None:
+    msgs = [
+        _msg("kartik", AuthorKind.HUMAN, "a", "m1"),
+        _msg("res", AuthorKind.PERSONA, "b", "m2"),
+    ]
+    assert [m.id for m in delta_messages(msgs, None)] == ["m1", "m2"]
+
+
+def test_delta_messages_slices_strictly_after_pointer() -> None:
+    msgs = [
+        _msg("kartik", AuthorKind.HUMAN, "a", "m1"),
+        _msg("kartik", AuthorKind.HUMAN, "b", "m2"),
+        _msg("res", AuthorKind.PERSONA, "c", "m3"),
+    ]
+    assert [m.id for m in delta_messages(msgs, "m2")] == ["m3"]
+
+
+def test_delta_messages_unknown_pointer_raises() -> None:
+    msgs = [_msg("kartik", AuthorKind.HUMAN, "a", "m1")]
+    with pytest.raises(TranscriptError) as exc_info:
+        delta_messages(msgs, "m99")
     assert "m99" in str(exc_info.value)
 
 

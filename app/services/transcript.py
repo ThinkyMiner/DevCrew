@@ -49,6 +49,38 @@ def _attribute(message: Message, persona_handle: str, name_of: NameResolver) -> 
     return f"[{display}]: {message.content}"
 
 
+def delta_messages(messages: Sequence[Message], last_seen_id: str | None) -> list[Message]:
+    """Return the messages strictly after ``last_seen_id`` — the single source of
+    truth for the delta slice (shared by :func:`build_delta` and the orchestrator's
+    quote-dedup so the two can never drift).
+
+    ``messages`` must be in chronological order. The ``last_seen_id`` pointer is
+    handled in exactly three cases:
+
+    - ``last_seen_id is None`` -> new persona; **all** messages are returned.
+    - ``last_seen_id`` is found in ``messages`` -> only messages *strictly after*
+      the pointer message are returned (the pointer message itself is excluded).
+    - ``last_seen_id`` is non-``None`` but **not** found in ``messages`` -> this
+      is an invariant violation (a stale/foreign pointer). We raise
+      :class:`~app.domain.errors.TranscriptError` rather than silently falling
+      back to "include everything", which would leak the full history into the
+      prompt (AGENTS §4: no silent fallbacks).
+    """
+    if last_seen_id is None:
+        return list(messages)
+    cut = -1
+    for i, m in enumerate(messages):
+        if m.id == last_seen_id:
+            cut = i
+            break
+    if cut < 0:
+        raise TranscriptError(
+            f"last_seen_id {last_seen_id!r} not found in messages; "
+            "refusing to fall back to full history (would leak context)"
+        )
+    return list(messages[cut + 1 :])
+
+
 def build_delta(
     messages: Sequence[Message],
     last_seen_id: str | None,
@@ -58,38 +90,16 @@ def build_delta(
 ) -> str:
     """Render the attributed block of messages strictly after ``last_seen_id``.
 
-    ``messages`` must be in chronological order. The ``last_seen_id`` pointer is
-    handled in exactly three cases:
-
-    - ``last_seen_id is None`` -> new persona; **all** messages are included.
-    - ``last_seen_id`` is found in ``messages`` -> only messages *strictly
-      after* the pointer message are included (the pointer message itself is
-      excluded).
-    - ``last_seen_id`` is non-``None`` but **not** found in ``messages`` -> this
-      is an invariant violation (a stale/foreign pointer). We raise
-      :class:`~app.domain.errors.TranscriptError` rather than silently falling
-      back to "include everything", which would leak the full history into the
-      prompt (AGENTS §4: no silent fallbacks).
+    Slicing is delegated to :func:`delta_messages` (the shared single source of
+    truth), so a stale/foreign pointer raises :class:`TranscriptError` rather
+    than silently dumping full history (AGENTS §4: no silent fallbacks).
 
     A message directed at this persona (via ``@<persona_handle>`` or
     ``@everyone``) is rendered with the ``→ @<handle>`` form; the persona's own
     past messages are still included, attributed by name. Returns ``""`` when
     nothing is new.
     """
-    if last_seen_id is None:
-        delta = list(messages)
-    else:
-        cut = -1
-        for i, m in enumerate(messages):
-            if m.id == last_seen_id:
-                cut = i
-                break
-        if cut < 0:
-            raise TranscriptError(
-                f"last_seen_id {last_seen_id!r} not found in messages; "
-                "refusing to fall back to full history (would leak context)"
-            )
-        delta = list(messages[cut + 1 :])
+    delta = delta_messages(messages, last_seen_id)
     if not delta:
         return ""
     return "\n".join(_attribute(m, persona_handle, name_of) for m in delta)
