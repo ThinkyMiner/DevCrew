@@ -32,8 +32,9 @@ Reality notes (from a live ``claude --print --output-format stream-json
   plus ``cache_creation_input_tokens`` / ``cache_read_input_tokens``. There is
   no single cumulative "context window" field, so ``context_tokens`` is derived
   as the sum of input + cache-read + cache-creation + output when any cache
-  field is present (a reasonable proxy for "tokens in the context window"),
-  else ``None``.
+  field is present (a reasonable proxy for "tokens in the context window"). On a
+  non-cached turn (no cache fields) it falls back to input + output so the
+  FR-C3 indicator isn't blank, and is ``None`` only when no token fields exist.
 """
 
 from __future__ import annotations
@@ -149,7 +150,12 @@ def _parse_result(obj: dict[str, object]) -> list[StreamEvent]:
     cache_creation = usage.get("cache_creation_input_tokens")
     context_tokens: int | None = None
     if cache_read is not None or cache_creation is not None:
+        # Cache-inclusive proxy for "tokens in the context window".
         context_tokens = input_tokens + _int(cache_read) + _int(cache_creation) + output_tokens
+    elif input_tokens or output_tokens:
+        # Non-cached turn: fall back to the sum of the available token fields so
+        # the FR-C3 indicator isn't blank (M3).
+        context_tokens = input_tokens + output_tokens
     return [
         Usage(
             input_tokens=input_tokens,

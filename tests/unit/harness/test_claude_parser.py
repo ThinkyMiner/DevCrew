@@ -84,7 +84,8 @@ def test_tool_result_accepts_plain_string_content() -> None:
     assert tr.is_error is True
 
 
-def test_result_without_cache_fields_has_no_context_tokens() -> None:
+def test_result_without_cache_fields_uses_input_plus_output_proxy() -> None:
+    # M3: non-cached turn still surfaces a context_tokens proxy (input+output).
     obj = {
         "type": "result",
         "subtype": "success",
@@ -96,6 +97,15 @@ def test_result_without_cache_fields_has_no_context_tokens() -> None:
     assert isinstance(usage, Usage)
     assert usage.input_tokens == 5
     assert usage.output_tokens == 7
+    assert usage.context_tokens == 12
+
+
+def test_result_with_no_token_fields_has_no_context_tokens() -> None:
+    obj = {"type": "result", "subtype": "success", "usage": {}}
+    events = parse_claude_line(obj)
+    assert len(events) == 1
+    usage = events[0]
+    assert isinstance(usage, Usage)
     assert usage.context_tokens is None
 
 
