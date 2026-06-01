@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from app.domain.errors import SessionNotFound
 from app.domain.models import (
     AuthorKind,
     HumanAuthor,
@@ -220,6 +223,20 @@ def test_run_create_and_finalize(db: Database) -> None:
     assert got.log_path == "/logs/x.jsonl"
 
 
+def test_finalize_unknown_run_id_raises(db: Database) -> None:
+    repo = RunRepo(db)
+    rr = RunRecord(
+        run_id="ghost",
+        room_id="r1",
+        persona_id="p1",
+        command_redacted="claude --print [REDACTED]",
+        usage={},
+    )
+    # never created -> finalize must fail loud, not silently no-op
+    with pytest.raises(SessionNotFound, match="ghost"):
+        repo.finalize(rr)
+
+
 # --- Cascade -------------------------------------------------------------
 
 
@@ -234,13 +251,32 @@ def test_deleting_room_cascades(db: Database) -> None:
     p = Persona(name="P", handle="p", provider=Provider.MOCK, model="m")
     personas.create(p)
     rooms.add_member(r.id, p.id)
-    msgs.create(Message(room_id=r.id, author_kind=AuthorKind.HUMAN, author_ref="me", content="x"))
+    base = Message(room_id=r.id, author_kind=AuthorKind.HUMAN, author_ref="me", content="x")
+    msgs.create(base)
+    # a quoted message so message_quote is populated and its cascade is exercised
+    msgs.create(
+        Message(
+            room_id=r.id,
+            author_kind=AuthorKind.HUMAN,
+            author_ref="me",
+            content="reply",
+            quoted_message_ids=[base.id],
+        )
+    )
     sessions.upsert(PersonaSession(room_id=r.id, persona_id=p.id, provider=Provider.MOCK))
+
+    # sanity: child rows exist before delete
+    assert db.query("SELECT COUNT(*) AS n FROM message_quote")[0]["n"] == 1
 
     rooms.delete(r.id)
 
     assert rooms.list_members(r.id) == []
     assert msgs.list_for_room(r.id) == []
     assert sessions.get(r.id, p.id) is None
+    # RAW counts prove child rows are actually deleted (not just filtered out)
+    assert db.query("SELECT COUNT(*) AS n FROM room_persona")[0]["n"] == 0
+    assert db.query("SELECT COUNT(*) AS n FROM message")[0]["n"] == 0
+    assert db.query("SELECT COUNT(*) AS n FROM message_quote")[0]["n"] == 0
+    assert db.query("SELECT COUNT(*) AS n FROM persona_session")[0]["n"] == 0
     # persona itself survives room deletion
     assert personas.get(p.id) is not None

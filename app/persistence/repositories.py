@@ -5,6 +5,7 @@ import json
 import sqlite3
 from datetime import datetime
 
+from app.domain.errors import SessionNotFound
 from app.domain.models import (
     AuthorKind,
     HumanAuthor,
@@ -38,6 +39,9 @@ class PersonaRepo:
 
     @staticmethod
     def _row_to_model(row: sqlite3.Row) -> Persona:
+        # model_construct() intentionally bypasses Pydantic validation: the DB is a
+        # trusted store (rows were validated on write), so revalidating on every read
+        # is wasted work. This is the deliberate persistence trust boundary (AGENTS 4.2).
         return Persona.model_construct(
             id=row["id"],
             name=row["name"],
@@ -393,7 +397,7 @@ class RunRepo:
         return run
 
     def finalize(self, run: RunRecord) -> RunRecord:
-        self._db.execute(
+        rowcount = self._db.execute_returning_rowcount(
             "UPDATE run_record SET command_redacted = ?, exit_code = ?, usage = ?, "
             "log_path = ?, error_kind = ?, finished_at = ? WHERE run_id = ?",
             (
@@ -406,6 +410,8 @@ class RunRepo:
                 run.run_id,
             ),
         )
+        if rowcount == 0:
+            raise SessionNotFound(f"cannot finalize unknown run_id: {run.run_id}")
         return run
 
     def get(self, run_id: str) -> RunRecord | None:

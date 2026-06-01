@@ -53,3 +53,33 @@ def test_transaction_rolls_back_on_error(tmp_path: Path) -> None:
             )
             raise ValueError("boom")
     assert db.query("SELECT id FROM room") == []
+
+
+def test_execute_inside_transaction_does_not_prematurely_commit(tmp_path: Path) -> None:
+    # Regression (I1): a db.execute() issued while a transaction() block is open
+    # must NOT commit the in-flight transactional work. If the block then raises,
+    # the rollback must discard BOTH the transactional write and the execute().
+    db = Database(tmp_path / "t.db")
+    db.init_schema()
+    db.execute("CREATE TABLE t (id TEXT PRIMARY KEY)")
+
+    with pytest.raises(RuntimeError):  # noqa: PT012
+        with db.transaction() as conn:
+            conn.execute("INSERT INTO t (id) VALUES (?)", ("r1",))
+            db.execute("INSERT INTO t (id) VALUES (?)", ("r2",))
+            raise RuntimeError("boom")
+
+    # Neither r1 nor r2 should have survived: both rolled back.
+    assert db.query("SELECT COUNT(*) AS n FROM t")[0]["n"] == 0
+
+
+def test_committed_transaction_persists_rows(tmp_path: Path) -> None:
+    db = Database(tmp_path / "t.db")
+    db.init_schema()
+    db.execute("CREATE TABLE t (id TEXT PRIMARY KEY)")
+
+    with db.transaction() as conn:
+        conn.execute("INSERT INTO t (id) VALUES (?)", ("r1",))
+        db.execute("INSERT INTO t (id) VALUES (?)", ("r2",))
+
+    assert db.query("SELECT COUNT(*) AS n FROM t")[0]["n"] == 2

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,6 +26,13 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
+        # Reentrant lock serializes all DB access on the shared
+        # check_same_thread=False connection (correctness over throughput for
+        # this local single-user app). Reentrancy lets execute()/executemany()
+        # be called from inside a transaction() block without deadlocking.
+        self._lock = threading.RLock()
+        # Transaction nesting depth: writes commit only when this is 0.
+        self._in_tx = 0
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -36,25 +44,55 @@ class Database:
         self._conn.commit()
 
     def query(self, sql: str, params: Sequence[SqlParam] = ()) -> list[sqlite3.Row]:
-        return list(self._conn.execute(sql, params))
+        with self._lock:
+            return list(self._conn.execute(sql, params))
 
     def execute(self, sql: str, params: Sequence[SqlParam] = ()) -> None:
-        self._conn.execute(sql, params)
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(sql, params)
+            if self._in_tx == 0:
+                self._conn.commit()
 
     def executemany(self, sql: str, rows: Sequence[Sequence[SqlParam]]) -> None:
-        self._conn.executemany(sql, rows)
-        self._conn.commit()
+        with self._lock:
+            self._conn.executemany(sql, rows)
+            if self._in_tx == 0:
+                self._conn.commit()
+
+    def execute_returning_rowcount(self, sql: str, params: Sequence[SqlParam] = ()) -> int:
+        """Like execute() but returns the statement's affected-row count.
+
+        Lock-guarded and transaction-aware exactly like execute(): commits only
+        at the outermost level. The cursor's rowcount is read while still under
+        the lock so it cannot be clobbered by a concurrent statement.
+        """
+        with self._lock:
+            cursor = self._conn.execute(sql, params)
+            rowcount = cursor.rowcount
+            if self._in_tx == 0:
+                self._conn.commit()
+            return rowcount
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        """Run statements atomically: commit on success, roll back on any error."""
-        try:
-            yield self._conn
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+        """Run statements atomically: commit on success, roll back on any error.
+
+        Nesting-aware: only the outermost block commits on success. Any
+        exception rolls back the whole (possibly nested) transaction and
+        re-raises. The reentrant lock serializes the entire block so
+        execute()/executemany() called within it stay non-committing.
+        """
+        with self._lock:
+            self._in_tx += 1
+            try:
+                yield self._conn
+                if self._in_tx == 1:
+                    self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+            finally:
+                self._in_tx -= 1
 
     def close(self) -> None:
         self._conn.close()
