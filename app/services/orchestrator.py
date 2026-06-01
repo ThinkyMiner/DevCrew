@@ -17,14 +17,17 @@ Responsibilities (Task 4.6 / FR-M1..M5, FR-MR1..3, FR-E2, FR-D1/D2)
    same-turn reply; their events are interleaved into the single yielded stream
    via an :class:`asyncio.Queue`.
 
-Fail-loud but ISOLATED (AGENTS §4): a single persona's failure (a raised typed
-harness error, or a stale transcript pointer) is turned into a ``RunError``
-event + an error-placeholder message for *that* persona and never aborts the
-post or the other personas.
+Fail-loud but ISOLATED (AGENTS §4): a single persona's failure is turned into a
+``RunError`` event + an error-placeholder message + a finalized ``RunRecord``
+(``error_kind`` set) for *that* persona, and NEVER aborts the post or the other
+personas — in EITHER SEQUENTIAL or PARALLEL mode. This holds uniformly for a
+raised typed harness error, a stale transcript pointer, AND any unexpected
+(untyped) exception from a backend: every persona turn is recorded then
+contained; no failure ever propagates out of its own turn.
 
-The harness adapters RAISE typed errors and never emit a terminal ``RunError``
-themselves; translating a raised error into a recorded ``RunError`` event is the
-orchestrator's job (per the adapter contract).
+The harness adapters RAISE errors (typed or otherwise) and never emit a terminal
+``RunError`` themselves; translating a raised error into a recorded ``RunError``
+event is the orchestrator's job (per the adapter contract).
 
 last-seen pointer semantics
 ---------------------------
@@ -47,7 +50,7 @@ all siblings, so none advances past a sibling's same-turn reply.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from datetime import UTC, datetime
 
 from app.config.logging import run_id_var
@@ -75,7 +78,7 @@ from app.persistence.repositories import (
 from app.persistence.run_log import RunLogStore, RunLogWriter
 from app.services.prompt import assemble_prompt
 from app.services.routing import resolve_targets
-from app.services.transcript import build_delta, render_quotes
+from app.services.transcript import build_delta, delta_messages, render_quotes
 
 YieldedEvent = tuple[str, StreamEvent]
 
@@ -148,16 +151,22 @@ class ChatOrchestrator:
 
         name_of = self._make_name_of()
 
+        # Hold the inner generator explicitly and aclose() it in a finally. A bare
+        # ``async for ... in inner(): yield`` does NOT close ``inner`` when *this*
+        # generator is itself aclose()'d (GeneratorExit) — the inner generator's
+        # own finally (which cancels + awaits the parallel workers, running their
+        # backend cleanup) would otherwise only fire on GC, leaking in-flight tasks
+        # on early stop. Explicit aclose() propagates GeneratorExit promptly.
+        inner: AsyncGenerator[YieldedEvent, None]
         if reply_mode is ReplyMode.PARALLEL:
-            async for item in self._run_parallel(
-                room_id, targets, author, text, quoted_id_list, name_of
-            ):
-                yield item
+            inner = self._run_parallel(room_id, targets, author, text, quoted_id_list, name_of)
         else:
-            async for item in self._run_sequential(
-                room_id, targets, author, text, quoted_id_list, name_of
-            ):
+            inner = self._run_sequential(room_id, targets, author, text, quoted_id_list, name_of)
+        try:
+            async for item in inner:
                 yield item
+        finally:
+            await inner.aclose()
 
     # ------------------------------------------------------------------ #
     # routing
@@ -188,7 +197,7 @@ class ChatOrchestrator:
         text: str,
         quoted_ids: list[str],
         name_of: _NameResolver,
-    ) -> AsyncIterator[YieldedEvent]:
+    ) -> AsyncGenerator[YieldedEvent, None]:
         for persona in targets:
             # current transcript: includes prior siblings' same-turn replies.
             messages = self._messages.list_for_room(room_id)
@@ -210,7 +219,7 @@ class ChatOrchestrator:
         text: str,
         quoted_ids: list[str],
         name_of: _NameResolver,
-    ) -> AsyncIterator[YieldedEvent]:
+    ) -> AsyncGenerator[YieldedEvent, None]:
         # One snapshot for everyone — no sibling sees another's same-turn reply.
         snapshot = self._messages.list_for_room(room_id)
         snapshot_tail = snapshot[-1].id if snapshot else None
@@ -218,19 +227,26 @@ class ChatOrchestrator:
         queue: asyncio.Queue[YieldedEvent | _Sentinel] = asyncio.Queue()
 
         async def worker(persona: Persona) -> None:
+            turn = self._run_turn(
+                room_id,
+                persona,
+                author,
+                text,
+                quoted_ids,
+                name_of,
+                snapshot,
+                snapshot_tail,
+            )
             try:
-                async for item in self._run_turn(
-                    room_id,
-                    persona,
-                    author,
-                    text,
-                    quoted_ids,
-                    name_of,
-                    snapshot,
-                    snapshot_tail,
-                ):
+                async for item in turn:
                     await queue.put(item)
             finally:
+                # On normal completion OR on cancellation (early stop / GeneratorExit
+                # propagated as CancelledError into the worker), explicitly close the
+                # per-turn generator so its finally — and the backend's run() finally —
+                # run promptly rather than waiting for GC. This is what composes
+                # GeneratorExit -> worker cancellation -> backend cleanup.
+                await turn.aclose()
                 await queue.put(_DONE)
 
         tasks = [asyncio.create_task(worker(p)) for p in targets]
@@ -243,8 +259,11 @@ class ChatOrchestrator:
                     continue
                 yield item
         finally:
-            # Drain/await all tasks so none leaks; _run_turn isolates its own
-            # errors, so this should not raise, but we surface any escape loudly.
+            # Cancel and await every worker so none leaks. Each persona's turn is
+            # fully isolated inside _run_turn (failures are recorded as a RunError
+            # event and never propagated), so a worker never raises a turn error
+            # out here; the only exceptions we expect from gather are CancelledError
+            # from the early-stop path, which return_exceptions=True absorbs.
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -264,7 +283,7 @@ class ChatOrchestrator:
         name_of: _NameResolver,
         messages: list[Message],
         pre_reply_tail: str | None,
-    ) -> AsyncIterator[YieldedEvent]:
+    ) -> AsyncGenerator[YieldedEvent, None]:
         session = self._sessions.get(room_id, persona.id)
         resume_session_id = session.harness_session_id if session else None
         last_seen = session.last_seen_message_id if session else None
@@ -321,16 +340,23 @@ class ChatOrchestrator:
                 ):
                     yield item
                 return
-            except Exception as exc:  # last-resort isolation; record then re-raise
+            except Exception as exc:
+                # Uniform per-persona isolation (AGENTS §4): an untyped error is
+                # recorded exactly like a typed one — structured RunError event +
+                # placeholder Message + finalized RunRecord (error_kind set in the
+                # finally) — and then we RETURN, never re-raise. Re-raising here
+                # used to abort later siblings in SEQUENTIAL mode and was silently
+                # swallowed by gather() in PARALLEL: an asymmetry. A persona's
+                # failure must never propagate out of its own turn in either mode.
                 error_kind = type(exc).__name__
                 async for item in self._emit_error(
                     room_id, persona, run_id, writer, error_kind, _redact(str(exc))
                 ):
                     yield item
-                raise
+                return
 
             # success: persist reply + advance pointer.
-            reply = self._messages.create(
+            self._messages.create(
                 Message(
                     room_id=room_id,
                     author_kind=AuthorKind.PERSONA,
@@ -349,7 +375,6 @@ class ChatOrchestrator:
                     status="idle",
                 )
             )
-            _ = reply  # persisted; id available via repo if needed downstream
         finally:
             run.exit_code = 0 if error_kind is None else 1
             run.error_kind = error_kind
@@ -378,8 +403,9 @@ class ChatOrchestrator:
         # Determine which message ids actually appear in the delta slice so we can
         # de-dup quotes: a quoted message already shown in the delta should not be
         # rendered again as a blockquote (the orchestrator owns this dedup, per
-        # render_quotes' docstring).
-        delta_ids = self._delta_ids(messages, last_seen)
+        # render_quotes' docstring). Reuse transcript.delta_messages — the SAME
+        # slicing build_delta uses — so the two can never drift (M4).
+        delta_ids = {m.id for m in delta_messages(messages, last_seen)}
         quoted_messages: list[Message] = []
         for qid in quoted_ids:
             if qid in delta_ids:
@@ -395,25 +421,6 @@ class ChatOrchestrator:
             new_text=text,
             persona_handle=persona.handle,
         )
-
-    @staticmethod
-    def _delta_ids(messages: list[Message], last_seen: str | None) -> set[str]:
-        """Ids included in the delta slice (mirrors build_delta's slicing).
-
-        ``build_delta`` already validated the pointer (raising on a stale one)
-        before this is called, so a missing pointer here is treated as "include
-        all" defensively; the authoritative validation lives in build_delta.
-        """
-        if last_seen is None:
-            return {m.id for m in messages}
-        cut = -1
-        for i, m in enumerate(messages):
-            if m.id == last_seen:
-                cut = i
-                break
-        if cut < 0:
-            return {m.id for m in messages}
-        return {m.id for m in messages[cut + 1 :]}
 
     def _build_spec(self, persona: Persona, prompt: str, resume_session_id: str | None) -> RunSpec:
         return RunSpec(

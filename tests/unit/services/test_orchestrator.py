@@ -8,9 +8,11 @@ providers, both backed by mocks. ``mock_b.last_prompt`` is then unambiguously B'
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from app.domain.events import RunError, TextDelta
+from app.domain.events import RunDone, RunError, TextDelta
 from app.domain.models import (
     AuthorKind,
     HumanAuthor,
@@ -49,6 +51,57 @@ class _RaisingBackend:
         self.calls.append(spec)
         yield TextDelta(text="partial-before-boom")
         raise self._exc
+
+    async def send_command(self, session_id: str, command: str):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+        yield  # pragma: no cover
+
+
+class _AwaitingBackend:
+    """A test-only backend with real await points so parallel workers interleave.
+
+    Implements the :class:`AgentBackend` contract. ``run`` yields several
+    ``TextDelta``s with ``await asyncio.sleep(0)`` between events (so the event
+    loop hands control to a sibling worker), then a terminal ``RunDone``. It can
+    optionally raise mid-stream, and records — via a ``cancelled`` flag set in a
+    ``finally`` — whether its ``run`` generator was closed/cancelled before
+    finishing (proving early-stop worker cancellation reaches the backend).
+    """
+
+    supported_commands: set[str] = set()
+
+    def __init__(
+        self,
+        name: str,
+        reply: str,
+        *,
+        n_deltas: int = 4,
+        raise_after: int | None = None,
+    ) -> None:
+        self.name = name
+        self._reply = reply
+        self._n_deltas = n_deltas
+        self._raise_after = raise_after
+        self.calls: list[RunSpec] = []
+        self.started = False
+        self.finished = False
+        self.cancelled = False
+
+    async def run(self, spec: RunSpec):  # type: ignore[no-untyped-def]
+        self.calls.append(spec)
+        self.started = True
+        try:
+            for i in range(self._n_deltas):
+                await asyncio.sleep(0)
+                yield TextDelta(text=f"{self._reply}-{i}")
+                if self._raise_after is not None and i >= self._raise_after:
+                    raise RuntimeError(f"{self.name}-boom")
+            yield RunDone(session_id=f"sess-{self.name}")
+            self.finished = True
+        finally:
+            if not self.finished:
+                # closed early (GeneratorExit / raise) before terminal RunDone
+                self.cancelled = True
 
     async def send_command(self, session_id: str, command: str):  # type: ignore[no-untyped-def]
         raise NotImplementedError
@@ -411,3 +464,154 @@ async def test_run_record_finalized_with_usage(orch, repos, room, me, persona_a,
     # command_redacted carries a high-level descriptor, no system prompt / secrets
     assert "model=opus" in run.command_redacted
     assert "resume=" in run.command_redacted
+
+
+def _orch_with_registry(repos, run_log, reg):
+    return ChatOrchestrator(
+        persona_repo=repos["persona"],
+        author_repo=repos["author"],
+        room_repo=repos["room"],
+        message_repo=repos["message"],
+        session_repo=repos["session"],
+        run_repo=repos["run"],
+        run_log=run_log,
+        registry=reg,
+    )
+
+
+# --- I1: uniform isolation for NON-typed (untyped) errors ------------------- #
+
+
+@pytest.mark.asyncio
+async def test_sequential_untyped_error_isolated_other_personas_complete(
+    repos, room, me, persona_a, persona_b, run_log, mock_b
+):
+    """A non-TeamError (RuntimeError) in persona A must NOT abort sibling B in
+    SEQUENTIAL mode; A is still recorded (RunError + placeholder + RunRecord).
+    """
+    failing = _RaisingBackend(RuntimeError("boom"))  # NOT a TeamError
+    reg = BackendRegistry()
+    reg.register(Provider.CLAUDE, failing)  # persona_a -> raises RuntimeError
+    reg.register(Provider.CODEX, mock_b)  # persona_b -> succeeds
+    mock_b.script_reply("beta", "BETA-OK")
+
+    orch = _orch_with_registry(repos, run_log, reg)
+    events = await _drain(
+        orch.post_message(
+            room.id, author=me, text="@alpha @beta go", reply_mode=ReplyMode.SEQUENTIAL
+        )
+    )
+
+    # persona_a got a recorded RunError (kind = the exception class name)
+    a_errors = [ev for pid, ev in events if pid == persona_a.id and isinstance(ev, RunError)]
+    assert len(a_errors) == 1
+    assert a_errors[0].error_kind == "RuntimeError"
+
+    # persona_b STILL completed and persisted its reply (the bug: it was aborted)
+    contents = [m.content for m in repos["message"].list_for_room(room.id)]
+    assert "BETA-OK" in contents
+
+    # error placeholder + finalized RunRecord with error_kind for persona_a
+    a_msgs = [
+        m
+        for m in repos["message"].list_for_room(room.id)
+        if m.author_kind is AuthorKind.PERSONA and m.author_ref == persona_a.id
+    ]
+    assert len(a_msgs) == 1
+    assert "error" in a_msgs[0].content.lower()
+    run = repos["run"].get(a_msgs[0].run_id)
+    assert run is not None
+    assert run.error_kind == "RuntimeError"
+    assert run.exit_code == 1
+
+
+# --- I2: real PARALLEL concurrency machinery -------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_parallel_events_interleave(repos, room, me, persona_a, persona_b, run_log):
+    """Two awaiting backends in PARALLEL produce a genuinely interleaved stream:
+    both persona ids appear among the first several events (not all-A-then-all-B).
+    """
+    back_a = _AwaitingBackend("A", "ALPHA", n_deltas=4)
+    back_b = _AwaitingBackend("B", "BETA", n_deltas=4)
+    reg = BackendRegistry()
+    reg.register(Provider.CLAUDE, back_a)
+    reg.register(Provider.CODEX, back_b)
+
+    orch = _orch_with_registry(repos, run_log, reg)
+    events = await _drain(
+        orch.post_message(room.id, author=me, text="@alpha @beta go", reply_mode=ReplyMode.PARALLEL)
+    )
+
+    # Look at the persona ids of the first several yielded events; with real
+    # await points both A and B must appear before either persona finishes its
+    # 4 deltas (i.e. within the first 4 events we should see both ids).
+    first_ids = [pid for pid, _ in events[:4]]
+    assert persona_a.id in first_ids and persona_b.id in first_ids, first_ids
+    # both replies persisted
+    contents = [m.content for m in repos["message"].list_for_room(room.id)]
+    assert any("ALPHA" in c for c in contents)
+    assert any("BETA" in c for c in contents)
+
+
+@pytest.mark.asyncio
+async def test_parallel_early_stop_cancels_workers_and_cleans_up(
+    repos, room, me, persona_a, persona_b, run_log
+):
+    """Consuming one event then aclose()-ing the generator must cancel in-flight
+    workers: the backend's ``finally`` runs (cancelled flag set) and no asyncio
+    task leaks.
+    """
+    back_a = _AwaitingBackend("A", "ALPHA", n_deltas=20)
+    back_b = _AwaitingBackend("B", "BETA", n_deltas=20)
+    reg = BackendRegistry()
+    reg.register(Provider.CLAUDE, back_a)
+    reg.register(Provider.CODEX, back_b)
+
+    orch = _orch_with_registry(repos, run_log, reg)
+    before = set(asyncio.all_tasks())
+
+    agen = orch.post_message(
+        room.id, author=me, text="@alpha @beta go", reply_mode=ReplyMode.PARALLEL
+    )
+    first = await agen.__anext__()
+    assert first[0] in {persona_a.id, persona_b.id}
+    await agen.aclose()
+    # give cancelled tasks a tick to run their finally blocks
+    await asyncio.sleep(0)
+
+    # at least one in-flight backend was cancelled (finally ran -> flag set);
+    # neither finished its full 20-delta stream
+    assert back_a.cancelled or back_b.cancelled
+    assert not (back_a.finished and back_b.finished)
+
+    # no worker task leaked
+    leaked = [t for t in (asyncio.all_tasks() - before) if not t.done()]
+    assert leaked == [], leaked
+
+
+@pytest.mark.asyncio
+async def test_parallel_one_raises_others_survive_under_concurrency(
+    repos, room, me, persona_a, persona_b, run_log
+):
+    """Under real concurrency, one awaiting backend raising mid-stream must not
+    stop the other from persisting its reply; the raiser gets a RunError.
+    """
+    back_a = _AwaitingBackend("A", "ALPHA", n_deltas=4, raise_after=1)  # raises mid-stream
+    back_b = _AwaitingBackend("B", "BETA", n_deltas=4)
+    reg = BackendRegistry()
+    reg.register(Provider.CLAUDE, back_a)
+    reg.register(Provider.CODEX, back_b)
+
+    orch = _orch_with_registry(repos, run_log, reg)
+    events = await _drain(
+        orch.post_message(room.id, author=me, text="@alpha @beta go", reply_mode=ReplyMode.PARALLEL)
+    )
+
+    a_errors = [ev for pid, ev in events if pid == persona_a.id and isinstance(ev, RunError)]
+    assert len(a_errors) == 1
+    assert a_errors[0].error_kind == "RuntimeError"
+
+    contents = [m.content for m in repos["message"].list_for_room(room.id)]
+    assert any("BETA" in c for c in contents)
