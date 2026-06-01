@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -18,7 +20,7 @@ from app.domain.events import (
 )
 from app.domain.models import PermissionMode, Provider
 from app.harness.base import AgentBackend, RunSpec
-from app.harness.claude import ClaudeHarness, Proc, _redact
+from app.harness.claude import ClaudeHarness, Proc, _default_spawn, _redact
 
 _FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "claude_stream_basic.jsonl"
 
@@ -34,6 +36,7 @@ class FakeProc:
         self._lines = lines
         self._returncode = returncode
         self._stderr = stderr
+        self.kill_calls = 0
 
     async def stdout_lines(self) -> AsyncIterator[str]:
         for line in self._lines:
@@ -44,6 +47,9 @@ class FakeProc:
 
     async def stderr_text(self) -> str:
         return self._stderr
+
+    async def kill(self) -> None:
+        self.kill_calls += 1
 
 
 class FakeSpawn:
@@ -76,6 +82,9 @@ class TimeoutProc:
 
     async def stderr_text(self) -> str:  # pragma: no cover
         return ""
+
+    async def kill(self) -> None:
+        return None
 
 
 def _spec(prompt: str = "hello", **kw: object) -> RunSpec:
@@ -258,3 +267,172 @@ def test_redact_scrubs_tokens() -> None:
 def test_fixture_is_valid_jsonl() -> None:
     for line in _fixture_lines():
         assert isinstance(json.loads(line), dict)
+
+
+# -- C2: child killed/reaped on every exit path (fake-level) -------------------
+
+
+async def test_proc_killed_on_normal_completion() -> None:
+    proc = FakeProc(_fixture_lines())
+    spawn = FakeSpawn(proc)
+    h = ClaudeHarness(spawn=spawn)
+    await _collect(h.run(_spec()))
+    assert proc.kill_calls == 1
+
+
+async def test_proc_killed_on_error_exit() -> None:
+    proc = FakeProc(_fixture_lines(), returncode=1, stderr="boom")
+    spawn = FakeSpawn(proc)
+    h = ClaudeHarness(spawn=spawn)
+    with pytest.raises(HarnessError):
+        await _collect(h.run(_spec()))
+    assert proc.kill_calls == 1
+
+
+async def test_proc_killed_on_early_generator_close() -> None:
+    proc = FakeProc(_fixture_lines())
+    spawn = FakeSpawn(proc)
+    h = ClaudeHarness(spawn=spawn)
+    agen = h.run(_spec())
+    await agen.__anext__()  # consume one event, then abandon the generator
+    await agen.aclose()
+    assert proc.kill_calls == 1
+
+
+# -- real-subprocess regression tests (M4) ------------------------------------
+#
+# These drive the REAL `_default_spawn` against a trivial deterministic child
+# (python3 -c "..."), never the claude CLI. They reproduce C1/C2/I2 which the
+# in-memory FakeProc cannot. Each is wrapped in asyncio.wait_for so a regression
+# manifests as a fast failure rather than a hang.
+
+
+def _child_spawn(child_src: str):  # type: ignore[no-untyped-def]
+    """A Spawn that ignores the harness-built argv and runs our child script.
+
+    Lets the full ClaudeHarness streaming/error path run against a real OS
+    subprocess whose behavior we control precisely.
+    """
+
+    async def spawn(argv: list[str], cwd: str | None) -> Proc:
+        return await _default_spawn([sys.executable, "-c", child_src], cwd)
+
+    return spawn
+
+
+async def test_real_subprocess_stderr_drain_does_not_deadlock() -> None:
+    # C1: child emits a stdout line, then floods 500 KB straight to the stderr fd
+    # (>> the OS pipe buffer) BEFORE emitting more stdout, then exits nonzero. If
+    # stderr is only read after stdout EOF (the old bug), the child blocks writing
+    # stderr while we block reading stdout -> deadlock. Concurrent draining fixes
+    # it. Bounded by wait_for so a regression fails fast instead of hanging.
+    child = (
+        "import sys, os\n"
+        "sys.stdout.write('{}' + chr(10)); sys.stdout.flush()\n"
+        "os.write(2, b'x' * 500000)\n"
+        "sys.stdout.write('{}' + chr(10)); sys.stdout.flush()\n"
+        "sys.exit(3)\n"
+    )
+    h = ClaudeHarness(spawn=_child_spawn(child), timeout=10.0)
+    with pytest.raises(HarnessError) as ei:
+        await asyncio.wait_for(_collect(h.run(_spec())), timeout=5.0)
+    # Not a timeout, and the nonzero exit surfaced with drained stderr.
+    assert not isinstance(ei.value, HarnessTimeout)
+    assert "exited 3" in str(ei.value)
+
+
+async def test_real_subprocess_stderr_secret_is_redacted() -> None:
+    # Companion to C1: confirm the concurrently-drained stderr is redacted.
+    child = (
+        "import sys\nsys.stderr.write('boom key=sk-ant-abcdef0123456789ABCDEF tail')\nsys.exit(1)\n"
+    )
+    h = ClaudeHarness(spawn=_child_spawn(child), timeout=10.0)
+    with pytest.raises(HarnessError) as ei:
+        await asyncio.wait_for(_collect(h.run(_spec())), timeout=5.0)
+    msg = str(ei.value)
+    assert "sk-ant-abcdef0123456789ABCDEF" not in msg
+    assert "[REDACTED]" in msg
+
+
+async def test_real_subprocess_timeout_kills_child() -> None:
+    # C2: child sleeps far past the short timeout. We must raise HarnessTimeout
+    # quickly AND the child must be killed/reaped (not left running).
+    child = "import time\ntime.sleep(30)\n"
+    spawn = _child_spawn(child)
+    captured: dict[str, Proc] = {}
+
+    async def capturing_spawn(argv: list[str], cwd: str | None) -> Proc:
+        proc = await spawn(argv, cwd)
+        captured["proc"] = proc
+        return proc
+
+    h = ClaudeHarness(spawn=capturing_spawn, timeout=1.0)
+    with pytest.raises(HarnessTimeout):
+        await asyncio.wait_for(_collect(h.run(_spec())), timeout=5.0)
+
+    # The underlying asyncio process should be reaped (returncode set) after the
+    # finally-block kill(). Reach into the concrete _AsyncioProc for the pid.
+    aproc = captured["proc"]
+    underlying = aproc._process  # type: ignore[attr-defined]
+    assert underlying.returncode is not None  # reaped
+    # And the OS pid is gone (os.kill(pid, 0) raises once it no longer exists).
+    import os
+
+    with pytest.raises((ProcessLookupError, PermissionError)):
+        os.kill(underlying.pid, 0)
+
+
+async def test_real_subprocess_big_valid_json_line_parses() -> None:
+    # I2: a single valid stream-json line well over the default 64 KiB limit must
+    # parse, proving we raised the StreamReader limit.
+    big_text = "y" * 200000
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "session_id": "sess-big",
+            "message": {"content": [{"type": "text", "text": big_text}]},
+        }
+    )
+    result_line = json.dumps(
+        {
+            "type": "result",
+            "session_id": "sess-big",
+            "usage": {"input_tokens": 1, "output_tokens": 2},
+        }
+    )
+    child = (
+        "import sys\n"
+        f"sys.stdout.write({line!r} + '\\n')\n"
+        f"sys.stdout.write({result_line!r} + '\\n')\n"
+        "sys.exit(0)\n"
+    )
+    h = ClaudeHarness(spawn=_child_spawn(child), timeout=10.0)
+    events = await asyncio.wait_for(_collect(h.run(_spec())), timeout=5.0)
+    text_events = [e for e in events if isinstance(e, TextDelta)]
+    assert len(text_events) == 1
+    assert text_events[0].text == big_text
+    assert isinstance(events[-1], RunDone)
+
+
+async def test_real_subprocess_oversized_line_becomes_harness_error() -> None:
+    # I2: a line beyond the raised limit converts to a typed HarnessError rather
+    # than escaping as a raw ValueError/LimitOverrunError. Use a tiny limit via a
+    # dedicated spawn so we don't have to emit 8 MB.
+    async def small_limit_spawn(argv: list[str], cwd: str | None) -> Proc:
+        from app.harness.claude import _AsyncioProc
+
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import sys\nsys.stdout.write('z' * 100000 + '\\n')\nsys.exit(0)\n",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=1024,  # deliberately tiny so the 100 KB line overruns
+        )
+        return _AsyncioProc(proc)
+
+    h = ClaudeHarness(spawn=small_limit_spawn, timeout=10.0)
+    with pytest.raises(HarnessError) as ei:
+        await asyncio.wait_for(_collect(h.run(_spec())), timeout=5.0)
+    assert not isinstance(ei.value, HarnessTimeout)
+    assert "over-long" in str(ei.value)
