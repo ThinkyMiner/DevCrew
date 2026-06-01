@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,17 @@ def test_foreign_keys_enabled(tmp_path: Path) -> None:
     db = Database(tmp_path / "t.db")
     db.init_schema()
     assert db.query("PRAGMA foreign_keys")[0]["foreign_keys"] == 1
+
+
+def test_close_is_idempotent_and_releases_connection(tmp_path: Path) -> None:
+    db = Database(tmp_path / "t.db")
+    db.init_schema()
+    db.close()
+    # Second close must not raise (safe to call twice, e.g. shutdown hook).
+    db.close()
+    # Connection is actually closed: a query now raises ProgrammingError.
+    with pytest.raises(sqlite3.ProgrammingError):
+        db.query("SELECT 1")
 
 
 def test_transaction_commits(tmp_path: Path) -> None:

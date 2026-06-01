@@ -95,4 +95,11 @@ class Database:
                 self._in_tx -= 1
 
     def close(self) -> None:
-        self._conn.close()
+        """Close the underlying sqlite connection. Idempotent and lock-guarded.
+
+        Safe to call more than once (e.g. an explicit shutdown after a context
+        manager already closed it): sqlite's ``close()`` tolerates a re-close, and
+        the lock serializes it against any in-flight query/execute.
+        """
+        with self._lock:
+            self._conn.close()
