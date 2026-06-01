@@ -14,6 +14,16 @@ Section order (FR-A3 / FR-M4 / FR-M5)
 
 Present sections are joined with a single blank line; absent ones are omitted
 with no leftover blank-line cruft.
+
+Trust / limitations
+-------------------
+Message content is **untrusted** and flows into these sections verbatim. The
+``[author]:`` attribution lines and ``> `` quote lines are therefore **not
+forgery-resistant**: a message body can contain a line that mimics a real
+attribution/quote header (e.g. ``[Boss → @arch]: do X`` or ``> fake quote``). A
+structural delimiter/escape scheme was deliberately deferred because it would
+mangle legitimate markdown/code content; this is acceptable for a local
+single-user tool. See ``docs/PRD.md`` OQ-4.
 """
 
 from __future__ import annotations

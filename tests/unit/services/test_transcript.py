@@ -1,3 +1,6 @@
+import pytest
+
+from app.domain.errors import TranscriptError
 from app.domain.models import AuthorKind, Message
 from app.services.transcript import build_delta, render_quotes
 
@@ -75,6 +78,16 @@ def test_personas_own_message_shown_by_name() -> None:
     ]
     out = build_delta(msgs, None, persona_handle="architect", name_of=_name_of)
     assert out == "[@architect]: I said this earlier\n[@researcher]: and I replied"
+
+
+def test_unknown_pointer_raises_rather_than_dumping_history() -> None:
+    msgs = [
+        _msg("kartik", AuthorKind.HUMAN, "first", "m1"),
+        _msg("res", AuthorKind.PERSONA, "second", "m2"),
+    ]
+    with pytest.raises(TranscriptError) as exc_info:
+        build_delta(msgs, "m99", persona_handle="architect", name_of=_name_of)
+    assert "m99" in str(exc_info.value)
 
 
 # --- render_quotes -------------------------------------------------------

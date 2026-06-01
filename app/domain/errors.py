@@ -25,3 +25,7 @@ class SessionNotFound(TeamError):
 
 class ProviderUnavailable(TeamError):
     pass
+
+
+class TranscriptError(TeamError):
+    pass
