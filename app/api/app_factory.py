@@ -29,6 +29,7 @@ from app.api import (
     routes_personas,
     routes_rooms,
     routes_runs,
+    ws,
 )
 from app.api.deps import Services
 from app.api.health import HealthReport, check_health
@@ -165,5 +166,7 @@ def create_app(
     app.include_router(routes_rooms.router)
     app.include_router(routes_messages.router)
     app.include_router(routes_runs.router)
+
+    ws.register_ws(app)
 
     return app
