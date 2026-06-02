@@ -29,6 +29,12 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Real-CLI smoke tests are opt-in: deselected by default so `pytest` spends no
+# tokens / spawns no real claude|codex. Run them explicitly with `pytest -m live`.
+addopts = "-m 'not live'"
+markers = [
+    "live: spawns the REAL claude/codex CLI (spends tokens). Deselected by default; run with `pytest -m live`.",
+]
 
 [tool.ruff]
 line-length = 100
