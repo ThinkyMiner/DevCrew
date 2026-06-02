@@ -26,39 +26,40 @@ export function openConsole({ persona, roomId, socket, onReset }) {
   };
 
   // Route this persona's command output into the console while it is open.
-  const prevEvent = socket.handlers.event;
-  const prevCard = socket.handlers.error_card;
-  const prevDone = socket.handlers.command_complete;
-  const prevErr = socket.handlers.error;
+  // We SUBSCRIBE additional handlers via the RoomSocket fan-out (Fix #5) rather
+  // than monkey-patching the transcript's handlers. Both consumers receive
+  // frames; on close we unsubscribe — via ANY close path (Close / ✕ / backdrop)
+  // — so the transcript's routing is never clobbered or leaked.
+  const unsubs = [];
+  unsubs.push(
+    socket.addHandler("event", (frame) => {
+      if (frame.persona_id !== persona.id) return;
+      const e = frame.event || {};
+      if (e.kind === "text") log(e.text || "");
+      else if (e.kind === "usage") {
+        const c = e.context_tokens != null ? `ctx ${e.context_tokens} · ` : "";
+        ctx.textContent = `context: ${c}in ${e.input_tokens ?? 0} / out ${e.output_tokens ?? 0}`;
+      } else if (e.kind === "done") log("— done —");
+    })
+  );
+  unsubs.push(
+    socket.addHandler("error_card", (frame) => {
+      if (frame.persona_id === persona.id) log(`[${frame.error_kind}] ${frame.message}`);
+    })
+  );
+  unsubs.push(
+    socket.addHandler("command_complete", () => {
+      log("✓ command complete");
+    })
+  );
+  unsubs.push(
+    socket.addHandler("error", (frame) => {
+      log(`[${frame.kind}] ${frame.message}`);
+    })
+  );
 
   const restore = () => {
-    socket.handlers.event = prevEvent;
-    socket.handlers.error_card = prevCard;
-    socket.handlers.command_complete = prevDone;
-    socket.handlers.error = prevErr;
-  };
-
-  socket.handlers.event = (frame) => {
-    prevEvent?.(frame);
-    if (frame.persona_id !== persona.id) return;
-    const e = frame.event || {};
-    if (e.kind === "text") log(e.text || "");
-    else if (e.kind === "usage") {
-      const c = e.context_tokens != null ? `ctx ${e.context_tokens} · ` : "";
-      ctx.textContent = `context: ${c}in ${e.input_tokens ?? 0} / out ${e.output_tokens ?? 0}`;
-    } else if (e.kind === "done") log("— done —");
-  };
-  socket.handlers.error_card = (frame) => {
-    prevCard?.(frame);
-    if (frame.persona_id === persona.id) log(`[${frame.error_kind}] ${frame.message}`);
-  };
-  socket.handlers.command_complete = (frame) => {
-    prevDone?.(frame);
-    log("✓ command complete");
-  };
-  socket.handlers.error = (frame) => {
-    prevErr?.(frame);
-    log(`[${frame.kind}] ${frame.message}`);
+    for (const off of unsubs.splice(0)) off();
   };
 
   const sendCommand = (command) => {
@@ -118,15 +119,9 @@ export function openConsole({ persona, roomId, socket, onReset }) {
   openModal({
     title: `Console · @${persona.handle}`,
     body,
-    footer: [
-      el("button", {
-        class: "btn",
-        text: "Close",
-        onClick: () => {
-          restore();
-          closeModal();
-        },
-      }),
-    ],
+    // onClose fires for EVERY close path (Close button, ✕, backdrop, Escape),
+    // so the console always unsubscribes its frame handlers (Fix #5).
+    onClose: restore,
+    footer: [el("button", { class: "btn", text: "Close", onClick: () => closeModal() })],
   });
 }
