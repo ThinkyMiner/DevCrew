@@ -12,6 +12,10 @@ venv/
 data/*.db
 data/*.sqlite3
 data/logs/
+# Dev mock launcher data dir + browser-verification artifacts
+data-dev/
+.playwright-mcp/
+*.png
 
 # Editor / OS
 .DS_Store
