@@ -82,10 +82,25 @@ export function openConsole({ persona, roomId, socket, onReset }) {
     },
   });
 
+  // The codex harness has no supported_commands, so /compact and /clear always
+  // fail-loud server-side. Disable them with a hint rather than letting the user
+  // click into a guaranteed error (the raw-command field stays usable). Backend
+  // behavior is unchanged.
+  const codex = persona.provider === "codex";
+  const cmdBtn = (label) => {
+    const props = { class: "btn", text: label, onClick: () => sendCommand(label) };
+    if (codex) {
+      props.disabled = true;
+      props.title = "not supported by codex";
+      props.onClick = null;
+    }
+    return el("button", props);
+  };
+
   const body = [
     el("div", { class: "console-cmds" }, [
-      el("button", { class: "btn", text: "/compact", onClick: () => sendCommand("/compact") }),
-      el("button", { class: "btn", text: "/clear", onClick: () => sendCommand("/clear") }),
+      cmdBtn("/compact"),
+      cmdBtn("/clear"),
       el("button", {
         class: "btn danger",
         text: "Reset session",

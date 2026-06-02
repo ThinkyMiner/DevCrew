@@ -5,7 +5,11 @@
 //  1. CANONICAL render (renderMessages): paint the persisted transcript fetched
 //     from GET /rooms/{id}/messages. Each message shows author name + color +
 //     @handle, timestamp, content (markdown-safe), quoted-message refs, and a
-//     footer linking to its run log (FR-T4).
+//     footer linking to its run log (FR-T4). A persisted persona FAILURE is
+//     stored as an error-marker Message ("[error: <kind>] <msg>"); the canonical
+//     render detects it and paints the SAME styled error card as the transient
+//     error_card frame (not a plain bubble) — so the failure is visible exactly
+//     once after the turn_complete repaint and stays traceable on reload.
 //
 //  2. OPTIMISTIC streaming (onEvent): the WS stream does NOT carry the persisted
 //     reply id (see app/api/ws.py "Canonical message ids"). As {type:event}
@@ -21,6 +25,7 @@
 
 import { el, clear, fmtTime, safeHref, truncate } from "./dom.js";
 import { renderMarkdown } from "./markdown.js";
+import { isErrorMarker, parseErrorMarker } from "./error_marker.js";
 
 export class Transcript {
   /**
@@ -85,6 +90,19 @@ export class Transcript {
   }
 
   _messageNode(msg) {
+    // A persona failure is persisted as a real Message whose content is an
+    // error marker ("[error: <kind>] <msg>"; see orchestrator._emit_error).
+    // Render it as the SAME styled error card the transient error_card WS frame
+    // uses — NOT a plain bubble — so the failure shows exactly once after the
+    // turn_complete repaint (and stays traceable via its run-log link on reload).
+    if (msg.author_kind === "persona" && isErrorMarker(msg.content)) {
+      const parsed = parseErrorMarker(msg.content);
+      return this._errorCardNode({
+        kind: parsed ? parsed.kind : "error",
+        message: parsed ? parsed.message : "",
+        logUrl: msg.run_id ? "/runs/" + encodeURIComponent(msg.run_id) + "/log" : null,
+      });
+    }
     const a = this._attr(msg);
     const head = el("div", { class: "msg-head" }, [
       el("span", { class: "msg-author", text: a.name, style: { color: a.color } }),
@@ -250,17 +268,22 @@ export class Transcript {
     this._scrollToBottom();
   }
 
-  /** Append an inline error card under the streaming persona (FR-E2). */
-  appendErrorCard(personaId, frame) {
-    const b = this.streaming.get(personaId) || null;
+  /**
+   * Build a styled error-card node. Shared by the transient error_card WS frame
+   * (appendErrorCard) and the canonical render of a persisted error-marker
+   * Message (_messageNode), so a failure looks identical in both paths and
+   * renders exactly once after reconcile. All sinks are textContent / safeHref.
+   * @param {{kind:string, message:string, commandRedacted?:string, logUrl?:string}} info
+   */
+  _errorCardNode({ kind, message, commandRedacted, logUrl }) {
     const head = el("div", { class: "ec-head" }, [
-      el("span", { text: "⚠ " + (frame.error_kind || "error") }),
+      el("span", { text: "⚠ " + (kind || "error") }),
     ]);
-    const children = [head, el("div", { class: "ec-msg", text: frame.message || "" })];
-    if (frame.command_redacted) {
-      children.push(el("div", { class: "ec-cmd", text: "$ " + frame.command_redacted }));
+    const children = [head, el("div", { class: "ec-msg", text: message || "" })];
+    if (commandRedacted) {
+      children.push(el("div", { class: "ec-cmd", text: "$ " + commandRedacted }));
     }
-    const href = safeHref(frame.log_url);
+    const href = safeHref(logUrl);
     if (href) {
       children.push(
         el("div", { class: "ec-cmd" }, [
@@ -268,7 +291,18 @@ export class Transcript {
         ])
       );
     }
-    const card = el("div", { class: "error-card" }, children);
+    return el("div", { class: "error-card" }, children);
+  }
+
+  /** Append an inline error card under the streaming persona (FR-E2). */
+  appendErrorCard(personaId, frame) {
+    const b = this.streaming.get(personaId) || null;
+    const card = this._errorCardNode({
+      kind: frame.error_kind || "error",
+      message: frame.message || "",
+      commandRedacted: frame.command_redacted,
+      logUrl: frame.log_url,
+    });
     if (b) b.node.append(card);
     else this.root.append(card);
     this._scrollToBottom();

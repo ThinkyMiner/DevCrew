@@ -50,7 +50,10 @@ class Persona(BaseModel):
     color: str = "#6aa0ff"
     provider: Provider
     model: str
-    effort: str | None = None  # maps to claude --effort / codex reasoning effort
+    # maps to claude --effort / codex reasoning effort. The claude CLI flag is
+    # verified to exist (`claude --effort <level>`, accepts low/medium/high/xhigh/max)
+    # as of claude-cli 2.1.159 — see app/harness/claude.py near the --effort argv.
+    effort: str | None = None
     system_prompt: str = ""
     mcp_servers: list[str] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=list)

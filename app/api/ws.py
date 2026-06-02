@@ -18,6 +18,12 @@ Server -> client (outbound):
 * ``{"type": "event", "persona_id", "event": {<StreamEvent.model_dump>}}`` — one
   per streamed event. A ``RunError`` event is NOT sent raw; it is translated into
   an ``error_card`` frame instead (FR-E2 — every failure is visible exactly once).
+  The error_card is the TRANSIENT in-stream view; the orchestrator also persists
+  the failure as an error-marker ``Message`` ("[error: <kind>] <msg>"). On
+  ``turn_complete`` the client repaints the canonical transcript (clearing the
+  transient cards) and renders that persisted marker as the same styled error
+  card (see app/web/js/transcript.js), so the failure remains visible exactly
+  once after reconcile — the canonical render owns the persisted display.
 * ``{"type": "error_card", "persona_id", "run_id", "error_kind", "message",
   "command_redacted", "log_url": "/runs/<run_id>/log"}`` — emitted when a
   ``RunError`` event is seen. ``run_id``/``log_path`` come from the enriched

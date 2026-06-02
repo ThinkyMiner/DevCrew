@@ -82,6 +82,11 @@ CREATE TABLE IF NOT EXISTS persona_session (
     FOREIGN KEY (persona_id) REFERENCES persona(id) ON DELETE CASCADE
 );
 
+-- run_record INTENTIONALLY has no FOREIGN KEY / ON DELETE CASCADE to room or
+-- persona (unlike room_persona, message, message_quote, persona_session above).
+-- These are audit/observability records: a run's history must survive deletion
+-- of the room or persona it referenced, so the asymmetry is by design, not an
+-- oversight. room_id/persona_id are kept as plain TEXT for lookup/indexing only.
 CREATE TABLE IF NOT EXISTS run_record (
     run_id           TEXT PRIMARY KEY,
     room_id          TEXT NOT NULL,

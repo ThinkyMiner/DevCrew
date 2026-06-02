@@ -254,6 +254,10 @@ class ClaudeHarness:
         if spec.system_prompt:
             argv += ["--append-system-prompt", spec.system_prompt]
         if spec.effort:
+            # `--effort <level>` is verified to exist in claude-cli 2.1.159
+            # (`claude --help` lists it; accepted levels: low, medium, high,
+            # xhigh, max). This is NOT an unverified open question — no hard
+            # validation here, the CLI rejects unknown levels fail-loud.
             argv += ["--effort", spec.effort]
         argv += ["--permission-mode", spec.permission_mode.value]
         if spec.working_dir:
