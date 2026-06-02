@@ -29,6 +29,9 @@ const state = {
   socket: null,
   transcript: null,
   composer: null,
+  // Monotonic room-switch token (Fix #4): bumped on each selectRoom; a slow
+  // earlier switch checks it after every await and bails if a newer switch won.
+  switchToken: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -85,19 +88,32 @@ async function loadRooms() {
 }
 
 async function selectRoom(roomId) {
+  // Fix #4: claim a switch token; after every await, bail if a newer switch
+  // started. This prevents a slow earlier selectRoom from overwriting
+  // state.socket/activeRoom with the previous room's data.
+  const token = ++state.switchToken;
+  const stale = () => token !== state.switchToken;
+
   if (state.socket) {
-    state.socket.close();
+    state.socket.close(); // closedByUs → no reconnect for the old room
     state.socket = null;
   }
-  state.activeRoom = await api.getRoom(roomId);
-  state.members = await api.listMembers(roomId);
+  const activeRoom = await api.getRoom(roomId);
+  if (stale()) return;
+  state.activeRoom = activeRoom;
+  const members = await api.listMembers(roomId);
+  if (stale()) return;
+  state.members = members;
   indexPersonas(state.members);
   // also index all personas so historical authors render correctly
   try {
-    indexPersonas(await api.listPersonas());
+    const all = await api.listPersonas();
+    if (stale()) return;
+    indexPersonas(all);
   } catch {
     /* non-fatal */
   }
+  if (stale()) return;
 
   renderRoomList($("room-list"), state.rooms, roomId, {
     onSelect: (r) => selectRoom(r.id),
@@ -114,7 +130,17 @@ async function selectRoom(roomId) {
   buildTranscript();
   buildComposer();
   await refreshMessages();
-  openSocket(roomId);
+  if (stale()) return;
+  openSocket(roomId, token);
+}
+
+function openMemberConsole(m, r) {
+  openConsole({
+    persona: m,
+    roomId: r.id,
+    socket: state.socket,
+    onReset: () => toast("Session", `@${m.handle} session reset`, 3000),
+  });
 }
 
 function renderHeader() {
@@ -134,13 +160,16 @@ function renderHeader() {
         {
           class: "member-chip",
           title: "Open session console",
-          onClick: () =>
-            openConsole({
-              persona: m,
-              roomId: r.id,
-              socket: state.socket,
-              onReset: () => toast("Session", `@${m.handle} session reset`, 3000),
-            }),
+          role: "button",
+          tabindex: "0",
+          "aria-label": `Open session console for @${m.handle}`,
+          onClick: () => openMemberConsole(m, r),
+          onKeydown: (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              openMemberConsole(m, r);
+            }
+          },
         },
         [
           el("span", { class: "dot", style: { background: m.color }, dataset: { p: m.id } }),
@@ -213,21 +242,94 @@ async function refreshMessages() {
 
 // -- websocket ---------------------------------------------------------------
 
-function openSocket(roomId) {
+// Reconcile = refetch canonical messages and repaint, which clears ALL
+// optimistic-* echoes and partial streaming bubbles (renderMessages clears the
+// streaming map and replaces children) — so ghosts left by a turn that never
+// completed cannot persist or pollute quote lookups.
+//
+// Reconcile triggers (Fix #2):
+//   * turn_complete    — normal end of a human turn (canonical-id contract)
+//   * command_complete — end of a console command turn
+//   * error            — pre-yield failure with no turn_complete
+//   * reconnect (open) — socket re-established after a drop mid-turn
+function openSocket(roomId, token) {
+  const isCurrent = () => token === state.switchToken && state.activeRoom?.id === roomId;
+  let everOpened = false;
+
   state.socket = new RoomSocket(roomId, {
-    event: (frame) => state.transcript.onEvent(frame.persona_id, frame.event),
-    error_card: (frame) => state.transcript.appendErrorCard(frame.persona_id, frame),
-    // Canonical-id contract: refetch on end-of-turn to reconcile optimistic
-    // bubbles (which have no persisted id/run_id) to the canonical messages.
-    turn_complete: () => refreshMessages(),
-    command_complete: () => {
-      /* console handles its own completion */
+    onStatus: (s) => {
+      if (isCurrent()) renderConnBanner(s);
     },
-    error: (frame) => toast(frame.kind, frame.message),
+    handlers: {
+      open: () => {
+        // On a RE-open (reconnect), reconcile so stale optimistic/partial
+        // bubbles are replaced by canonical state.
+        if (everOpened && isCurrent()) refreshMessages();
+        everOpened = true;
+      },
+      event: (frame) => state.transcript.onEvent(frame.persona_id, frame.event),
+      error_card: (frame) => state.transcript.appendErrorCard(frame.persona_id, frame),
+      // Canonical-id contract: refetch on end-of-turn to reconcile optimistic
+      // bubbles (which have no persisted id/run_id) to the canonical messages.
+      turn_complete: () => refreshMessages(),
+      // A console command turn also persists/changes state; reconcile so the
+      // transcript reflects it and no partial bubble lingers.
+      command_complete: () => refreshMessages(),
+      // Pre-yield error (no turn_complete): reconcile to drop the orphaned
+      // optimistic echo + any partial persona bubble, then surface the error.
+      error: (frame) => {
+        toast(frame.kind, frame.message);
+        refreshMessages();
+      },
+    },
   });
 }
 
+// -- connection-state banner (Fix #3) ----------------------------------------
+
+function renderConnBanner(stateName) {
+  const b = $("conn-banner");
+  clear(b);
+  b.className = "conn-banner";
+  if (stateName === "open" || stateName === "connecting") {
+    // open: hidden. connecting (first attempt): stay quiet to avoid flicker.
+    return;
+  }
+  if (stateName === "reconnecting") {
+    b.classList.add("show");
+    b.append(
+      el("span", { class: "conn-spinner" }),
+      el("span", { text: "Reconnecting…" })
+    );
+  } else if (stateName === "closed") {
+    b.classList.add("show", "down");
+    b.append(
+      el("span", { class: "conn-spinner" }),
+      el("span", { text: "Disconnected — connection lost." }),
+      el("button", {
+        class: "btn tiny conn-retry",
+        text: "Reconnect",
+        onClick: () => {
+          renderConnBanner("reconnecting");
+          state.socket?.reconnect();
+        },
+      })
+    );
+  }
+}
+
 // -- settings buttons --------------------------------------------------------
+
+// Let role="button" divs activate on Enter/Space like real buttons (a11y).
+function onActivate(node, fn) {
+  node.addEventListener("click", fn);
+  node.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      fn();
+    }
+  });
+}
 
 function wireSettings() {
   $("new-room-btn").addEventListener("click", () =>
@@ -236,7 +338,7 @@ function wireSettings() {
       selectRoom(room.id);
     })
   );
-  $("open-personas").addEventListener("click", () =>
+  onActivate($("open-personas"), () =>
     openPersonaManager({
       onChange: async () => {
         if (state.activeRoom) {
@@ -248,7 +350,7 @@ function wireSettings() {
       },
     })
   );
-  $("open-authors").addEventListener("click", () =>
+  onActivate($("open-authors"), () =>
     openAuthorManager({
       onChange: async () => {
         await loadAuthors();
