@@ -205,6 +205,10 @@ detailed in the [design doc](plans/2026-06-01-team-chat-design.md).
   context indicator (FR-C3).
 - **OQ-3** Codex stream-json event schema vs Claude's — normalize both into the
   shared `StreamEvent` model in `domain/`.
+- **OQ-4** Attribution lines in the persona prompt are forgeable by message
+  content (a body can contain a fake `[Boss → @x]:` line). Accepted for the
+  local single-user model; revisit if multi-user or untrusted input is added —
+  a structural delimiter/escape scheme is the mitigation.
 
 ## 10. Out of scope
 

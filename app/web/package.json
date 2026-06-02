@@ -1,0 +1,6 @@
+{
+  "//": "Not a build step (NFR-2 buildless). This marks the .js files in app/web as native ES modules so `node --test` can import them directly for the mention-parsing logic test (tests/js/). Browsers load them via <script type=module> regardless; no dependencies, no bundler.",
+  "name": "team-web",
+  "private": true,
+  "type": "module"
+}
