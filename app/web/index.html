@@ -10,6 +10,7 @@
     <!-- team-app: SPA shell mount marker (asserted by the serve test). -->
     <div id="app">
       <div class="health-banner" id="health-banner"></div>
+      <div class="conn-banner" id="conn-banner" role="status" aria-live="polite"></div>
 
       <aside class="sidebar">
         <div class="brand">
@@ -20,7 +21,12 @@
         <div class="sidebar-section" style="flex: 1">
           <div class="section-head">
             <span>Rooms</span>
-            <button class="btn tiny ghost" id="new-room-btn" title="New room">
+            <button
+              class="btn tiny ghost"
+              id="new-room-btn"
+              title="New room"
+              aria-label="Create new room"
+            >
               +
             </button>
           </div>
@@ -31,14 +37,20 @@
           <div class="section-head">
             <span>Settings</span>
           </div>
-          <div class="room-item" id="open-personas">⚙ Personas</div>
-          <div class="room-item" id="open-authors">✎ Authors</div>
+          <div class="room-item" id="open-personas" role="button" tabindex="0" aria-label="Manage personas">⚙ Personas</div>
+          <div class="room-item" id="open-authors" role="button" tabindex="0" aria-label="Manage authors">✎ Authors</div>
         </div>
       </aside>
 
       <main class="main">
         <header class="room-header" id="room-header"></header>
-        <div class="transcript" id="transcript"></div>
+        <div
+          class="transcript"
+          id="transcript"
+          role="log"
+          aria-live="polite"
+          aria-label="Message transcript"
+        ></div>
         <div class="composer" id="composer"></div>
       </main>
     </div>

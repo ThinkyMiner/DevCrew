@@ -27,9 +27,19 @@ export function renderRoomList(container, rooms, activeId, { onSelect, onSetting
         el("span", {
           class: "gear",
           text: "⚙",
+          role: "button",
+          tabindex: "0",
+          "aria-label": `Room settings for ${r.name}`,
           onClick: (e) => {
             e.stopPropagation();
             onSettings(r);
+          },
+          onKeydown: (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              e.stopPropagation();
+              onSettings(r);
+            }
           },
         }),
       ]

@@ -29,7 +29,7 @@ export class Composer {
     clear(this.root);
 
     // bar: writing-as + weight flag + mode toggle
-    this.authorSelect = el("select");
+    this.authorSelect = el("select", { "aria-label": "Writing as (author)" });
     this.weightFlag = el("span", { class: "weight-flag", text: "✦ weighted input" });
     const writingAs = el("div", { class: "writing-as" }, [
       el("span", { text: "Writing as" }),
@@ -37,8 +37,16 @@ export class Composer {
       this.weightFlag,
     ]);
 
-    this.modeSeq = el("button", { text: "sequential", onClick: () => this._setMode("sequential") });
-    this.modePar = el("button", { text: "parallel", onClick: () => this._setMode("parallel") });
+    this.modeSeq = el("button", {
+      text: "sequential",
+      "aria-label": "Reply mode: sequential",
+      onClick: () => this._setMode("sequential"),
+    });
+    this.modePar = el("button", {
+      text: "parallel",
+      "aria-label": "Reply mode: parallel",
+      onClick: () => this._setMode("parallel"),
+    });
     const modeToggle = el("div", { class: "mode-toggle", title: "Reply mode (FR-MR1)" }, [
       this.modeSeq,
       this.modePar,
@@ -55,6 +63,7 @@ export class Composer {
     // input + mention popup
     this.textarea = el("textarea", {
       rows: "1",
+      "aria-label": "Message",
       placeholder: "Message  ·  @handle to address a persona, @everyone for all  ·  Enter to send",
       onInput: () => {
         this._autosize();
@@ -138,6 +147,9 @@ export class Composer {
           el("span", {
             class: "qc-x",
             text: "✕",
+            role: "button",
+            tabindex: "0",
+            "aria-label": "Remove quote",
             onClick: () => {
               this.quoted = this.quoted.filter((x) => x.id !== q.id);
               this._renderQuotes();
