@@ -11,6 +11,7 @@ enough to move everything together.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 from pydantic import model_validator
@@ -51,10 +52,14 @@ class Settings(BaseSettings):
         """Neutral, EMPTY directory used as the spawn cwd for personas with no
         bound working_dir (persona environment isolation).
 
-        Must contain no CLAUDE.md/AGENTS.md so a persona's claude/codex child
-        cannot load this repo's project docs. Created by the composition root.
+        MUST live OUTSIDE the project tree: claude/codex discover CLAUDE.md /
+        AGENTS.md by walking UP the directory tree, so a scratch dir under
+        ``data_dir`` (inside the repo) would still pick up this project's docs
+        and make a persona behave like a "Team coding agent". Placing it under
+        the system temp dir means the walk-up finds no project docs. (Verified
+        live: a scratch dir inside the repo loaded the repo's CLAUDE.md.)
         """
-        return self.data_dir / "persona-scratch"
+        return Path(tempfile.gettempdir()) / "team-persona-scratch"
 
 
 def default_settings() -> Settings:

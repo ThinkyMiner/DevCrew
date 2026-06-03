@@ -117,8 +117,9 @@ async def test_run_builds_expected_argv() -> None:
     assert "--print" in argv
     assert argv[argv.index("--output-format") + 1] == "stream-json"
     assert "--verbose" in argv
-    # Persona isolation: --bare skips operator hooks/LSP/plugins (superpowers).
-    assert "--bare" in argv
+    # Persona isolation is via a neutral spawn cwd, NOT --bare: --bare breaks
+    # auth ("Not logged in"), so it must never be passed.
+    assert "--bare" not in argv
     assert argv[argv.index("--model") + 1] == "claude-haiku-4-5"
     assert argv[argv.index("--append-system-prompt") + 1] == "you are helpful"
     assert argv[argv.index("--effort") + 1] == "high"
@@ -204,22 +205,18 @@ async def test_permission_modes_map_to_valid_claude_choices() -> None:
         assert got == want and got in valid, f"{mode} -> {got}"
 
 
-async def test_resume_run_includes_bare_flag() -> None:
-    # Persona isolation: --bare must be present on the resume path too.
+async def test_bare_flag_never_passed_on_any_path() -> None:
+    # --bare breaks auth ("Not logged in"); it must NOT appear on run, resume,
+    # or send_command paths. Isolation is via the neutral spawn cwd instead.
     spawn = FakeSpawn(FakeProc(_fixture_lines()))
     h = ClaudeHarness(spawn=spawn)
     await _collect(h.run(_spec(resume_session_id="prev-sess")))
-    assert spawn.argv is not None
-    assert "--bare" in spawn.argv
+    assert spawn.argv is not None and "--bare" not in spawn.argv
 
-
-async def test_send_command_resume_argv_includes_bare_flag() -> None:
-    # send_command uses _resume_argv — it must also carry --bare.
-    spawn = FakeSpawn(FakeProc(_fixture_lines()))
-    h = ClaudeHarness(spawn=spawn)
-    await _collect(h.send_command("sess-1", "/compact"))
-    assert spawn.argv is not None
-    assert "--bare" in spawn.argv
+    spawn2 = FakeSpawn(FakeProc(_fixture_lines()))
+    h2 = ClaudeHarness(spawn=spawn2)
+    await _collect(h2.send_command("sess-1", "/compact"))
+    assert spawn2.argv is not None and "--bare" not in spawn2.argv
 
 
 # -- persona environment isolation (scratch cwd) -------------------------------

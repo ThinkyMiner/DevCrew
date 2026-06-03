@@ -34,18 +34,24 @@ _DEFAULT_TIMEOUT = 600.0
 # Applied to EVERY invocation (initial run + resume) so a persona behaves ONLY per
 # its configured --append-system-prompt, never as the operator's "Team coding
 # agent":
-#   --bare               "Minimal mode: skip hooks, LSP, plugins" (from
-#                        `claude --help`). Kills the operator's SessionStart hooks
-#                        and the superpowers plugin's skill-injection ("Using
-#                        systematic-debugging ...") that was polluting replies.
-#   --setting-sources "" Load NONE of the user/project/local setting sources
-#                        (default loads all three). Verified: with --bare alone
-#                        the init event still listed 11 operator plugins; adding
-#                        an empty --setting-sources drops loaded plugins to 0, so
-#                        the operator's global Claude Code config cannot leak in.
-# (The neutral spawn cwd — see ClaudeHarness._spawn_cwd — handles the OTHER half:
-# not loading this repo's CLAUDE.md/AGENTS.md when the persona has no working_dir.)
-_ISOLATION_FLAGS = ["--bare", "--setting-sources", ""]
+# Persona environment isolation is achieved via a NEUTRAL spawn cwd OUTSIDE the
+# project tree (see ClaudeHarness._spawn_cwd + Settings.resolved_scratch_dir): a
+# persona with no bound working_dir runs in a clean temp dir, so its claude child
+# does not walk up and load this repo's CLAUDE.md/AGENTS.md (which was making
+# personas behave like a "Team coding agent").
+#
+# We deliberately do NOT pass isolation FLAGS — both options that looked apt were
+# verified live to break auth:
+#   --bare                 → "Not logged in · Please run /login" (minimal mode
+#                            skips the credential bootstrap).
+#   --setting-sources ""   → same; it drops the user settings that carry the
+#                            OAuth/subscription credentials.
+# KNOWN LIMITATION (TODO/OQ): the operator's USER-GLOBAL Claude Code plugins/
+# hooks (e.g. a SessionStart hook) still load for persona children and can add
+# minor behavioral flavor. There is no flag that disables them without also
+# dropping auth; a future fix is to point personas at a clean CLAUDE_CONFIG_DIR
+# that has the credentials copied in but no plugins/hooks.
+_ISOLATION_FLAGS: list[str] = []
 
 # The domain PermissionMode is provider-agnostic (read-only/ask/auto); the Claude
 # CLI's `--permission-mode` accepts a DIFFERENT vocabulary (verified against
