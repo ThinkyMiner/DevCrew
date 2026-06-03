@@ -76,9 +76,18 @@ from app.persistence.repositories import (
     SessionRepo,
 )
 from app.persistence.run_log import RunLogStore, RunLogWriter
+from app.services.mentions import find_mentions
 from app.services.prompt import assemble_prompt
 from app.services.routing import resolve_targets
 from app.services.transcript import build_delta, delta_messages, render_quotes
+
+# Delegation caps (the "Balanced" preset). A persona's reply may pull in teammates
+# by @handle; these bound the blast radius so one post can't fan out without limit.
+# depth: operator post = 0, each delegation hop +1 (turns deeper than this are
+# dropped). runs: total delegated turns allowed per operator post. A persona is
+# also invoked at most ONCE per post (cycle guard), so chains always terminate.
+DELEGATION_DEPTH_CAP = 2
+DELEGATION_RUN_CAP = 6
 
 YieldedEvent = tuple[str, StreamEvent]
 
@@ -134,15 +143,14 @@ class ChatOrchestrator:
         PARALLEL mode events from concurrent personas are interleaved.
         """
         quoted_id_list = list(quoted_ids)
-        self._messages.create(
-            Message(
-                room_id=room_id,
-                author_kind=AuthorKind.HUMAN,
-                author_ref=author.id,
-                content=text,
-                quoted_message_ids=quoted_id_list,
-            )
+        human_message = Message(
+            room_id=room_id,
+            author_kind=AuthorKind.HUMAN,
+            author_ref=author.id,
+            content=text,
+            quoted_message_ids=quoted_id_list,
         )
+        self._messages.create(human_message)
 
         targets = self._resolve(room_id, text, tagged_override)
         if not targets:
@@ -150,6 +158,8 @@ class ChatOrchestrator:
             return
 
         name_of = self._make_name_of()
+        room = self._rooms.get(room_id)
+        delegation_on = bool(room and room.delegation_enabled)
 
         # Hold the inner generator explicitly and aclose() it in a finally. A bare
         # ``async for ... in inner(): yield`` does NOT close ``inner`` when *this*
@@ -157,16 +167,64 @@ class ChatOrchestrator:
         # own finally (which cancels + awaits the parallel workers, running their
         # backend cleanup) would otherwise only fire on GC, leaking in-flight tasks
         # on early stop. Explicit aclose() propagates GeneratorExit promptly.
-        inner: AsyncGenerator[YieldedEvent, None]
-        if reply_mode is ReplyMode.PARALLEL:
-            inner = self._run_parallel(room_id, targets, author, text, quoted_id_list, name_of)
-        else:
-            inner = self._run_sequential(room_id, targets, author, text, quoted_id_list, name_of)
+        inner = self._drive(
+            room_id,
+            targets,
+            author,
+            text,
+            quoted_id_list,
+            name_of,
+            reply_mode,
+            human_message.id,
+            delegation_on,
+        )
         try:
             async for item in inner:
                 yield item
         finally:
             await inner.aclose()
+
+    async def _drive(
+        self,
+        room_id: str,
+        targets: list[Persona],
+        author: HumanAuthor,
+        text: str,
+        quoted_ids: list[str],
+        name_of: _NameResolver,
+        reply_mode: ReplyMode,
+        human_message_id: str,
+        delegation_on: bool,
+    ) -> AsyncGenerator[YieldedEvent, None]:
+        """Run the operator's targeted turns, then any delegated turns they spawn.
+
+        Each sub-generator (the initial wave and the delegation loop) is held and
+        aclose()'d in a finally so GeneratorExit (early client disconnect) reaps
+        in-flight harness subprocesses promptly — same contract as post_message.
+        """
+        if reply_mode is ReplyMode.PARALLEL:
+            initial = self._run_parallel(
+                room_id, targets, author, text, quoted_ids, name_of, delegation_on
+            )
+        else:
+            initial = self._run_sequential(
+                room_id, targets, author, text, quoted_ids, name_of, delegation_on
+            )
+        try:
+            async for item in initial:
+                yield item
+        finally:
+            await initial.aclose()
+
+        if not delegation_on:
+            return
+
+        deleg = self._run_delegations(room_id, targets, human_message_id, name_of)
+        try:
+            async for item in deleg:
+                yield item
+        finally:
+            await deleg.aclose()
 
     async def send_control(
         self, room_id: str, persona_id: str, command: str
@@ -310,13 +368,22 @@ class ChatOrchestrator:
         text: str,
         quoted_ids: list[str],
         name_of: _NameResolver,
+        delegation_on: bool = False,
     ) -> AsyncGenerator[YieldedEvent, None]:
         for persona in targets:
             # current transcript: includes prior siblings' same-turn replies.
             messages = self._messages.list_for_room(room_id)
             pre_reply_tail = messages[-1].id if messages else None
             async for item in self._run_turn(
-                room_id, persona, author, text, quoted_ids, name_of, messages, pre_reply_tail
+                room_id,
+                persona,
+                author,
+                text,
+                quoted_ids,
+                name_of,
+                messages,
+                pre_reply_tail,
+                delegation_on,
             ):
                 yield item
 
@@ -332,6 +399,7 @@ class ChatOrchestrator:
         text: str,
         quoted_ids: list[str],
         name_of: _NameResolver,
+        delegation_on: bool = False,
     ) -> AsyncGenerator[YieldedEvent, None]:
         # One snapshot for everyone — no sibling sees another's same-turn reply.
         snapshot = self._messages.list_for_room(room_id)
@@ -349,6 +417,7 @@ class ChatOrchestrator:
                 name_of,
                 snapshot,
                 snapshot_tail,
+                delegation_on,
             )
             try:
                 async for item in turn:
@@ -383,6 +452,158 @@ class ChatOrchestrator:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     # ------------------------------------------------------------------ #
+    # delegation (persona -> persona)
+    # ------------------------------------------------------------------ #
+
+    async def _run_delegations(
+        self,
+        room_id: str,
+        initial_targets: list[Persona],
+        human_message_id: str,
+        name_of: _NameResolver,
+    ) -> AsyncGenerator[YieldedEvent, None]:
+        """Follow @-mentions in persona replies, breadth-first, within the caps.
+
+        Each persona runs at most ONCE per post (cycle guard) and the chain is
+        bounded by ``DELEGATION_DEPTH_CAP`` (hops) and ``DELEGATION_RUN_CAP``
+        (total delegated turns). A mentioned persona that isn't a room member is
+        pulled in (added to the room) before it runs.
+        """
+        invoked: set[str] = {p.id for p in initial_targets}
+        runs_used = 0
+        # The operator's targets replied at depth 0; turns they spawn are depth 1.
+        frontier: list[tuple[Message, int]] = [
+            (reply, 1) for reply in self._replies_after(room_id, human_message_id)
+        ]
+        while frontier:
+            next_frontier: list[tuple[Message, int]] = []
+            for reply, depth in frontier:
+                if depth > DELEGATION_DEPTH_CAP:
+                    continue
+                delegator = self._personas.get(reply.author_ref)
+                if delegator is None:
+                    continue
+                for target in self._resolve_delegations(reply.content, room_id, delegator.handle):
+                    if runs_used >= DELEGATION_RUN_CAP:
+                        return  # hard fan-out stop for the whole post
+                    if target.id in invoked:
+                        continue  # cycle guard: one turn per persona per post
+                    invoked.add(target.id)
+                    runs_used += 1
+                    messages = self._messages.list_for_room(room_id)
+                    pre_reply_tail = messages[-1].id if messages else None
+                    turn = self._run_delegated_turn(
+                        room_id, target, delegator, name_of, messages, pre_reply_tail
+                    )
+                    try:
+                        async for item in turn:
+                            yield item
+                    finally:
+                        await turn.aclose()
+                    child = self._latest_reply(room_id, target.id)
+                    if child is not None:
+                        next_frontier.append((child, depth + 1))
+            frontier = next_frontier
+
+    async def _run_delegated_turn(
+        self,
+        room_id: str,
+        target: Persona,
+        delegator: Persona,
+        name_of: _NameResolver,
+        messages: list[Message],
+        pre_reply_tail: str | None,
+    ) -> AsyncGenerator[YieldedEvent, None]:
+        """Run ``target``'s turn in response to ``delegator``'s reply.
+
+        The delegator's reply already sits in the transcript (directed at the
+        target via its @handle), so it arrives through the normal delta. We pass
+        a transient author = the delegator's name and a short nudge as the directed
+        line — no second agent loop, just the existing turn machinery.
+        """
+        pseudo_author = HumanAuthor(name=delegator.name, weight_enabled=False, weight_note="")
+        nudge = f"(brought in by @{delegator.handle} above — please respond)"
+        async for item in self._run_turn(
+            room_id,
+            target,
+            pseudo_author,
+            nudge,
+            [],
+            name_of,
+            messages,
+            pre_reply_tail,
+            delegation_on=True,
+        ):
+            yield item
+
+    def _resolve_delegations(
+        self, content: str, room_id: str, delegator_handle: str
+    ) -> list[Persona]:
+        """Personas a reply delegates to: explicit @handles (not @everyone, not
+        the delegator itself), resolved globally and auto-added to the room."""
+        delegator_handle = delegator_handle.lstrip("@").lower()
+        handles: list[str] = []
+        seen: set[str] = set()
+        for mention in find_mentions(content):
+            if mention == "everyone" or mention == delegator_handle or mention in seen:
+                continue
+            seen.add(mention)
+            handles.append(mention)
+        if not handles:
+            return []
+        by_handle = {p.handle: p for p in self._personas.list()}
+        members = set(self._rooms.list_members(room_id))
+        out: list[Persona] = []
+        for handle in handles:
+            persona = by_handle.get(handle)
+            if persona is None:
+                continue  # unknown handle: ignored, same as operator routing
+            if persona.id not in members:
+                self._rooms.add_member(room_id, persona.id)  # pull-in
+            out.append(persona)
+        return out
+
+    def _replies_after(self, room_id: str, message_id: str) -> list[Message]:
+        """Persona reply messages created strictly after ``message_id`` (skipping
+        error markers) — the operator-turn replies that can seed delegation."""
+        messages = self._messages.list_for_room(room_id)
+        idx = next((i for i, m in enumerate(messages) if m.id == message_id), -1)
+        tail = messages[idx + 1 :] if idx >= 0 else messages
+        return [m for m in tail if self._is_delegatable_reply(m)]
+
+    def _latest_reply(self, room_id: str, persona_id: str) -> Message | None:
+        """The most recent non-error reply authored by ``persona_id``."""
+        for message in reversed(self._messages.list_for_room(room_id)):
+            if message.author_ref == persona_id and self._is_delegatable_reply(message):
+                return message
+        return None
+
+    @staticmethod
+    def _is_delegatable_reply(message: Message) -> bool:
+        return message.author_kind is AuthorKind.PERSONA and not message.content.startswith(
+            "[error:"
+        )
+
+    def _roster_note(self, room_id: str, exclude: Persona) -> str:
+        """The teammate roster appended to a persona's system prompt when
+        delegation is enabled, so it knows who it can call by @handle."""
+        members: list[Persona] = []
+        for pid in self._rooms.list_members(room_id):
+            persona = self._personas.get(pid)
+            if persona is not None and persona.id != exclude.id:
+                members.append(persona)
+        if not members:
+            return ""
+        lines = "\n".join(f"- @{p.handle} — {p.job or p.name}" for p in members)
+        return (
+            "# Your team\n"
+            "You're in a group chat with the operator and the teammates below. To bring a "
+            "teammate in or ask them to work on something, mention their @handle in your "
+            "reply — they'll be pulled into the room if needed and will respond. Delegate "
+            "only when it genuinely helps; don't tag everyone.\n" + lines
+        )
+
+    # ------------------------------------------------------------------ #
     # one persona turn (shared by sequential & parallel)
     # ------------------------------------------------------------------ #
 
@@ -396,6 +617,7 @@ class ChatOrchestrator:
         name_of: _NameResolver,
         messages: list[Message],
         pre_reply_tail: str | None,
+        delegation_on: bool = False,
     ) -> AsyncGenerator[YieldedEvent, None]:
         session = self._sessions.get(room_id, persona.id)
         resume_session_id = session.harness_session_id if session else None
@@ -432,7 +654,8 @@ class ChatOrchestrator:
                     yield item
                 return
 
-            spec = self._build_spec(persona, prompt, resume_session_id)
+            roster = self._roster_note(room_id, persona) if delegation_on else ""
+            spec = self._build_spec(persona, prompt, resume_session_id, roster)
             backend = self._registry.get_backend(persona.provider)
 
             try:
@@ -538,12 +761,24 @@ class ChatOrchestrator:
             persona_handle=persona.handle,
         )
 
-    def _build_spec(self, persona: Persona, prompt: str, resume_session_id: str | None) -> RunSpec:
+    def _build_spec(
+        self,
+        persona: Persona,
+        prompt: str,
+        resume_session_id: str | None,
+        system_suffix: str = "",
+    ) -> RunSpec:
+        system_prompt = persona.system_prompt
+        if system_suffix:
+            # Append the live teammate roster (delegation enabled) so the persona
+            # knows who it can pull in. Kept in the system prompt, not the user
+            # prompt, so it steers behavior without polluting the transcript.
+            system_prompt = f"{system_prompt}\n\n{system_suffix}".strip()
         return RunSpec(
             prompt=prompt,
             provider=persona.provider,
             model=persona.model,
-            system_prompt=persona.system_prompt,
+            system_prompt=system_prompt,
             effort=persona.effort,
             resume_session_id=resume_session_id,
             mcp_servers=persona.mcp_servers,

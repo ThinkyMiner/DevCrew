@@ -17,9 +17,34 @@ def test_persona_handle_normalised_and_validated():
         Persona(name="x", handle="has space", provider=Provider.CLAUDE, model="m")
 
 
+def test_persona_job_defaults_empty_and_accepts_value():
+    # `job` is a short human-facing role label (e.g. "System architect") shown
+    # next to the persona name once it's renamed to a real name.
+    p = Persona(name="Architect", handle="architect", provider=Provider.CLAUDE, model="opus")
+    assert p.job == ""
+    p2 = Persona(
+        name="Jordan",
+        handle="jordan",
+        provider=Provider.CLAUDE,
+        model="opus",
+        job="System architect",
+    )
+    assert p2.job == "System architect"
+
+
 def test_boss_author_weight_enabled_by_default():
     boss = HumanAuthor(name="Boss", weight_note="Leadership input — weight heavily.")
     assert boss.weight_enabled is True
+
+
+def test_room_delegation_enabled_by_default():
+    # Personas can delegate to each other by default; the per-room switch lets the
+    # operator turn it off.
+    from app.domain.models import Room
+
+    r = Room(name="General")
+    assert r.delegation_enabled is True
+    assert Room(name="Quiet", delegation_enabled=False).delegation_enabled is False
 
 
 def test_persona_handle_invariant_total_under_mutation():

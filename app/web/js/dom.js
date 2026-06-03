@@ -27,6 +27,13 @@ export function el(tag, props = {}, children = []) {
       Object.assign(node.style, v);
     } else if (k.startsWith("on") && typeof v === "function") {
       node.addEventListener(k.slice(2).toLowerCase(), v);
+    } else if (k === "value") {
+      // Set via the live property, not the attribute: <textarea> has no `value`
+      // attribute (its text comes from the property/children), so setAttribute
+      // would silently leave it blank. The property is correct for <input>,
+      // <textarea>, <select>, and <option> alike. (textContent is still the only
+      // sink for untrusted display content — this is form-control state.)
+      node.value = String(v);
     } else {
       node.setAttribute(k, String(v));
     }

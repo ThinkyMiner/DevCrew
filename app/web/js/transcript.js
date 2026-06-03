@@ -52,6 +52,7 @@ export class Transcript {
       return {
         name: p ? p.name : "persona",
         handle: p ? p.handle : null,
+        job: p ? p.job || "" : "",
         color: p ? p.color : "#9aa1b8",
         boss: false,
       };
@@ -60,6 +61,7 @@ export class Transcript {
     return {
       name: a ? a.name : "author",
       handle: null,
+      job: "",
       color: a ? a.color : "#9ee37d",
       boss: !!(a && a.weight_enabled && (a.weight_note || "").trim()),
     };
@@ -107,6 +109,7 @@ export class Transcript {
     const head = el("div", { class: "msg-head" }, [
       el("span", { class: "msg-author", text: a.name, style: { color: a.color } }),
       a.handle ? el("span", { class: "msg-handle", text: "@" + a.handle }) : null,
+      a.job ? el("span", { class: "msg-job", text: a.job }) : null,
       a.boss ? el("span", { class: "msg-boss-badge", text: "weighted" }) : null,
       el("span", { class: "msg-time", text: fmtTime(msg.created_at) }),
     ]);
@@ -163,6 +166,7 @@ export class Transcript {
       el("div", { class: "msg-head" }, [
         el("span", { class: "msg-author", text: p ? p.name : "persona", style: { color } }),
         p ? el("span", { class: "msg-handle", text: "@" + p.handle }) : null,
+        p && p.job ? el("span", { class: "msg-job", text: p.job }) : null,
         el("span", { class: "msg-time", text: "now" }),
       ]),
       body,

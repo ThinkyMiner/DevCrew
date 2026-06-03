@@ -36,6 +36,7 @@ def test_persona_create_fetch_roundtrip(db: Database) -> None:
         provider=Provider.CLAUDE,
         model="opus",
         effort="high",
+        job="System architect",
         system_prompt="be terse",
         mcp_servers=["fs", "git"],
         allowed_tools=["Read", "Grep"],
@@ -93,6 +94,16 @@ def test_room_roundtrip(db: Database) -> None:
     r = Room(name="General", topic="stuff", default_reply_mode=ReplyMode.PARALLEL)
     repo.create(r)
     assert repo.get(r.id) == r
+
+
+def test_room_delegation_enabled_roundtrips(db: Database) -> None:
+    repo = RoomRepo(db)
+    r = Room(name="Quiet", delegation_enabled=False)
+    repo.create(r)
+    assert repo.get(r.id).delegation_enabled is False  # type: ignore[union-attr]
+    r.delegation_enabled = True
+    repo.update(r)
+    assert repo.get(r.id).delegation_enabled is True  # type: ignore[union-attr]
 
 
 def test_room_membership_preserves_order(db: Database) -> None:

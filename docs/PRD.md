@@ -50,10 +50,13 @@ PRD translates them into concrete requirements.
 
 - **FR-P1** Create, edit, duplicate, and delete personas. Editing a persona never
   destroys its existing sessions unless the operator explicitly resets them.
-- **FR-P2** A persona has: display name, unique handle (`@handle`), color/avatar,
-  provider (`claude`|`codex`), model, effort/thinking level, system prompt
-  (personality + role), MCP server set, allowed tools, optional working directory,
-  and permission mode (`read-only` | `ask` | `auto`).
+- **FR-P2** A persona has: display name, unique handle (`@handle`), a short
+  **job** label (role descriptor shown next to the name in chat, e.g. "System
+  architect"), color/avatar, provider (`claude`|`codex`), model, effort/thinking
+  level, system prompt (personality + role), MCP server set, allowed tools,
+  optional working directory, and permission mode (`read-only` | `ask` | `auto`).
+  The editor presents model/effort as dropdowns (model is typeable for
+  forward-compat) and allowed-tools/MCP as multi-select pickers.
 - **FR-P3** Persona templates: save a configured persona as a reusable template.
 - **FR-P4** A persona may belong to multiple rooms; it holds a **separate session
   per room** (see FR-S1).
@@ -80,6 +83,15 @@ PRD translates them into concrete requirements.
 - **FR-M5** **Quote-reply**: the operator can quote one or more earlier messages.
   Quoted messages are injected into the tagged personas' context explicitly marked
   as quotes, regardless of whether those personas had seen them.
+- **FR-M6** **Persona-to-persona delegation** (per-room toggle, `delegation_enabled`,
+  default on): when a persona's reply `@`-mentions another persona, that persona is
+  given a turn (seeing the delegating message via the normal delta). A mentioned
+  non-member is **auto-added** to the room first. Bounded by the orchestrator's caps
+  — delegation **depth** ≤ 2, ≤ **6** delegated turns per operator post, and each
+  persona runs **at most once per post** (cycle guard) — so chains always terminate.
+  When enabled, each run's system prompt carries the live teammate roster (handles +
+  jobs). No second agent loop: delegation reuses the same `@`-routing and turn
+  machinery as operator posts. See [`DECISIONS.md`](DECISIONS.md) D13.
 
 ### 4.5 Multi-reply behavior
 
@@ -167,11 +179,14 @@ detailed in the [design doc](plans/2026-06-01-team-chat-design.md).
 
 ## 7. Data model (SQLite)
 
-- **persona** — id, name, handle, color, provider, model, effort, system_prompt,
-  mcp_servers (json), allowed_tools (json), working_dir, permission_mode,
-  is_template, timestamps.
+- **persona** — id, name, handle, color, job, provider, model, effort,
+  system_prompt, mcp_servers (json), allowed_tools (json), working_dir,
+  permission_mode, is_template, timestamps. (`job` added via an idempotent
+  additive migration in `Database._migrate` for pre-existing DBs.)
 - **human_author** — id, name, color, weight_note, weight_enabled.
-- **room** — id, name, topic, default_reply_mode, archived, timestamps.
+- **room** — id, name, topic, default_reply_mode, delegation_enabled, archived,
+  timestamps. (`delegation_enabled` added via the additive migration in
+  `Database._migrate`; default 1/on.)
 - **room_persona** — room_id, persona_id, order. (membership)
 - **message** — id, room_id, author_kind (`human`|`persona`), author_ref (author or
   persona id), content, created_at, run_id (nullable).

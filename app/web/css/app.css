@@ -373,6 +373,15 @@ textarea {
   color: var(--text-faint);
   font-size: 12px;
 }
+.msg-job {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  border: 1px solid var(--line);
+  padding: 0px 6px;
+  border-radius: 999px;
+}
 .msg-time {
   color: var(--text-faint);
   font-size: 11px;
@@ -392,9 +401,11 @@ textarea {
   margin-top: 3px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-family: var(--serif);
-  font-size: 15px;
-  line-height: 1.6;
+  /* Match the persona's own font: replies render in the same mono UI face as the
+   * @handle / author name above them, not the editorial serif. */
+  font-family: var(--ui);
+  font-size: 13px;
+  line-height: 1.62;
 }
 .msg-body code {
   font-family: var(--mono);
@@ -839,6 +850,48 @@ input[type="color"] {
   height: 36px;
   padding: 2px;
   cursor: pointer;
+}
+
+/* Multi-select pickers (allowed tools / MCP servers): pill checkboxes + an
+ * add-custom row. `.field .pick-*` prefixes win specificity over the generic
+ * `.field label` / `.field input` rules above. */
+.pick {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pick-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+.field .pick-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 3px 10px 3px 8px;
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.field .pick-opt input {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+}
+.pick-add {
+  display: flex;
+  gap: 8px;
+}
+.field .pick-add-input {
+  width: auto;
+  flex: 1;
 }
 
 .template-list,

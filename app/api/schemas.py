@@ -20,6 +20,7 @@ class PersonaCreate(BaseModel):
     provider: Provider
     model: str
     color: str = "#6aa0ff"
+    job: str = ""
     effort: str | None = None
     system_prompt: str = ""
     mcp_servers: list[str] = []
@@ -35,6 +36,7 @@ class PersonaUpdate(BaseModel):
     provider: Provider | None = None
     model: str | None = None
     color: str | None = None
+    job: str | None = None
     effort: str | None = None
     system_prompt: str | None = None
     mcp_servers: list[str] | None = None
@@ -62,12 +64,14 @@ class RoomCreate(BaseModel):
     name: str
     topic: str = ""
     default_reply_mode: ReplyMode = ReplyMode.SEQUENTIAL
+    delegation_enabled: bool = True
 
 
 class RoomUpdate(BaseModel):
     name: str | None = None
     topic: str | None = None
     default_reply_mode: ReplyMode | None = None
+    delegation_enabled: bool | None = None
     archived: bool | None = None
 
 

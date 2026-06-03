@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS persona (
     name            TEXT NOT NULL,
     handle          TEXT NOT NULL UNIQUE,
     color           TEXT NOT NULL,
+    job             TEXT NOT NULL DEFAULT '',     -- short role label shown by the name
     provider        TEXT NOT NULL,
     model           TEXT NOT NULL,
     effort          TEXT,
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS room (
     name               TEXT NOT NULL,
     topic              TEXT NOT NULL DEFAULT '',
     default_reply_mode TEXT NOT NULL,
+    delegation_enabled INTEGER NOT NULL DEFAULT 1, -- bool: personas may delegate
     archived           INTEGER NOT NULL DEFAULT 0, -- bool
     created_at         TEXT NOT NULL               -- iso datetime
 );

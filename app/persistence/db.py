@@ -42,6 +42,32 @@ class Database:
         sql = _SCHEMA_PATH.read_text(encoding="utf-8")
         self._conn.executescript(sql)
         self._conn.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Apply additive, idempotent migrations to a pre-existing database.
+
+        schema.sql uses ``CREATE TABLE IF NOT EXISTS``, so a column added to the
+        schema is NOT applied to an install whose table already exists. Each
+        entry adds a missing column; we check ``PRAGMA table_info`` first because
+        SQLite has no ``ADD COLUMN IF NOT EXISTS``. New schema columns that must
+        also reach existing databases get one line here. (Table names are fixed
+        literals, never user input.)
+        """
+        additive: list[tuple[str, str, str]] = [
+            ("persona", "job", "ALTER TABLE persona ADD COLUMN job TEXT NOT NULL DEFAULT ''"),
+            (
+                "room",
+                "delegation_enabled",
+                "ALTER TABLE room ADD COLUMN delegation_enabled INTEGER NOT NULL DEFAULT 1",
+            ),
+        ]
+        with self._lock:
+            for table, column, ddl in additive:
+                cols = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+                if column not in cols:
+                    self._conn.execute(ddl)
+            self._conn.commit()
 
     def query(self, sql: str, params: Sequence[SqlParam] = ()) -> list[sqlite3.Row]:
         with self._lock:

@@ -47,6 +47,7 @@ class PersonaRepo:
             name=row["name"],
             handle=row["handle"],
             color=row["color"],
+            job=row["job"],
             provider=Provider(row["provider"]),
             model=row["model"],
             effort=row["effort"],
@@ -61,15 +62,16 @@ class PersonaRepo:
 
     def create(self, persona: Persona) -> Persona:
         self._db.execute(
-            "INSERT INTO persona (id, name, handle, color, provider, model, effort, "
+            "INSERT INTO persona (id, name, handle, color, job, provider, model, effort, "
             "system_prompt, mcp_servers, allowed_tools, working_dir, permission_mode, "
             "is_template, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 persona.id,
                 persona.name,
                 persona.handle,
                 persona.color,
+                persona.job,
                 persona.provider.value,
                 persona.model,
                 persona.effort,
@@ -94,13 +96,14 @@ class PersonaRepo:
 
     def update(self, persona: Persona) -> Persona:
         self._db.execute(
-            "UPDATE persona SET name = ?, handle = ?, color = ?, provider = ?, model = ?, "
-            "effort = ?, system_prompt = ?, mcp_servers = ?, allowed_tools = ?, "
+            "UPDATE persona SET name = ?, handle = ?, color = ?, job = ?, provider = ?, "
+            "model = ?, effort = ?, system_prompt = ?, mcp_servers = ?, allowed_tools = ?, "
             "working_dir = ?, permission_mode = ?, is_template = ? WHERE id = ?",
             (
                 persona.name,
                 persona.handle,
                 persona.color,
+                persona.job,
                 persona.provider.value,
                 persona.model,
                 persona.effort,
@@ -184,19 +187,21 @@ class RoomRepo:
             name=row["name"],
             topic=row["topic"],
             default_reply_mode=ReplyMode(row["default_reply_mode"]),
+            delegation_enabled=bool(row["delegation_enabled"]),
             archived=bool(row["archived"]),
             created_at=_parse_dt(row["created_at"]),
         )
 
     def create(self, room: Room) -> Room:
         self._db.execute(
-            "INSERT INTO room (id, name, topic, default_reply_mode, archived, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO room (id, name, topic, default_reply_mode, delegation_enabled, "
+            "archived, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 room.id,
                 room.name,
                 room.topic,
                 room.default_reply_mode.value,
+                int(room.delegation_enabled),
                 int(room.archived),
                 _dt(room.created_at),
             ),
@@ -214,11 +219,12 @@ class RoomRepo:
     def update(self, room: Room) -> Room:
         self._db.execute(
             "UPDATE room SET name = ?, topic = ?, default_reply_mode = ?, "
-            "archived = ? WHERE id = ?",
+            "delegation_enabled = ?, archived = ? WHERE id = ?",
             (
                 room.name,
                 room.topic,
                 room.default_reply_mode.value,
+                int(room.delegation_enabled),
                 int(room.archived),
                 room.id,
             ),

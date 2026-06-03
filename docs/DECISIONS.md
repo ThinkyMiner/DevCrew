@@ -164,3 +164,34 @@ styled card (transient cards are cleared on the reconcile repaint). `run_id` tie
 the UI card → `RunRecord` → `data/logs/.../<run_id>.jsonl` → reproduce-in-mock.
 
 - **Why:** the operator's stated top priority is "errors easy to find."
+
+## D13. Persona-to-persona delegation reuses `@`-routing — bounded, no second loop
+
+A persona's reply that `@`-mentions another persona delegates a turn to that
+persona (auto-adding them to the room if needed). Implemented in the orchestrator
+as a breadth-first pass *after* the operator's targets reply: scan each reply for
+mentions (`_resolve_delegations`), run the mentioned persona via the **same**
+`_run_turn` machinery (a transient author = the delegator's name + a short nudge;
+the delegator's actual message arrives through the normal delta), then scan its
+reply, and so on.
+
+- **Why this shape:** it does **not** introduce a second agent loop or a new
+  prompt path — it reuses `find_mentions` + the existing turn/delta/stream code,
+  staying true to the core rule (AGENTS §2). A persona learns who it can call from
+  an auto-injected **roster** (handle + job) appended to its *system* prompt (not
+  the user prompt, so it steers behaviour without polluting the transcript).
+- **Caps (the hard part):** unbounded delegation is a runaway-cost / infinite-loop
+  risk. Three independent bounds, all in `orchestrator.py`: depth ≤
+  `DELEGATION_DEPTH_CAP` (2), ≤ `DELEGATION_RUN_CAP` (6) delegated turns per post,
+  and **once per persona per post** (the cycle guard — the strongest of the three;
+  it alone guarantees termination). The "Balanced" preset was the operator's choice.
+- **Per-room toggle:** `Room.delegation_enabled` (default on) gates the whole
+  feature; when off, no scanning, no roster injection. Auto-adding a mentioned
+  non-member is the "personas can add others to rooms" capability.
+- **Consequences:** delegated turns stream and persist exactly like operator-driven
+  turns (same `(persona_id, event)` contract, same per-persona error isolation, same
+  `aclose` cleanup chain — each sub-generator is held + aclose()'d in `_drive` /
+  `_run_delegations`). The frontend re-fetches membership on reconcile so an
+  auto-added persona appears in the header/roster. Attribution remains forgeable
+  (D3/OQ-4): a message body could fake a `@handle` — accepted for the local
+  single-user model, and bounded by the caps regardless.

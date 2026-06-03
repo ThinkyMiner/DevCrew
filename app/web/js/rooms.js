@@ -104,6 +104,8 @@ export async function openRoomSettings(room, { onChanged }) {
   mode.value = room.default_reply_mode || "sequential";
   const archived = el("input", { type: "checkbox" });
   if (room.archived) archived.checked = true;
+  const delegation = el("input", { type: "checkbox" });
+  if (room.delegation_enabled ?? true) delegation.checked = true;
 
   const reopen = async () => {
     const fresh = await api.getRoom(room.id);
@@ -153,6 +155,7 @@ export async function openRoomSettings(room, { onChanged }) {
         name: name.value.trim(),
         topic: topic.value.trim(),
         default_reply_mode: mode.value,
+        delegation_enabled: delegation.checked,
         archived: archived.checked,
       });
       onChanged?.();
@@ -167,6 +170,13 @@ export async function openRoomSettings(room, { onChanged }) {
     body: [
       el("div", { class: "field-row" }, [field("Name", name).field, field("Default reply mode", mode).field]),
       field("Topic", topic).field,
+      el("div", { class: "field" }, [
+        el("label", { text: "Delegation" }),
+        el("label", { class: "hint" }, [
+          delegation,
+          el("span", { text: "  let personas call each other by @handle (auto-adds them to the room)" }),
+        ]),
+      ]),
       el("div", { class: "field" }, [
         el("label", { text: "Archive" }),
         el("label", { class: "hint" }, [archived, el("span", { text: "  archive room" })]),

@@ -24,6 +24,62 @@ def test_schema_creates_all_tables(tmp_path: Path) -> None:
     } <= tables
 
 
+def test_init_schema_migrates_legacy_persona_table_adding_job(tmp_path: Path) -> None:
+    # Simulate a pre-`job` database: create the persona table WITHOUT the job
+    # column and insert a row, then init_schema() must add the column (idempotent
+    # migration) and leave the existing row intact with the default job ''.
+    db = Database(tmp_path / "t.db")
+    db.execute(
+        "CREATE TABLE persona (id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+        "handle TEXT NOT NULL UNIQUE, color TEXT NOT NULL, provider TEXT NOT NULL, "
+        "model TEXT NOT NULL, effort TEXT, system_prompt TEXT NOT NULL DEFAULT '', "
+        "mcp_servers TEXT NOT NULL DEFAULT '[]', allowed_tools TEXT NOT NULL DEFAULT '[]', "
+        "working_dir TEXT, permission_mode TEXT NOT NULL, is_template INTEGER NOT NULL "
+        "DEFAULT 0, created_at TEXT NOT NULL)"
+    )
+    db.execute(
+        "INSERT INTO persona (id, name, handle, color, provider, model, permission_mode, "
+        "created_at) VALUES ('p1','Old','old','#fff','mock','m','read-only',"
+        "'2026-01-01T00:00:00+00:00')"
+    )
+    cols_before = {r["name"] for r in db.query("PRAGMA table_info(persona)")}
+    assert "job" not in cols_before
+
+    db.init_schema()
+
+    cols_after = {r["name"] for r in db.query("PRAGMA table_info(persona)")}
+    assert "job" in cols_after
+    row = db.query("SELECT job FROM persona WHERE id = 'p1'")[0]
+    assert row["job"] == ""
+
+    # Idempotent: a second init_schema() must not raise (column already present).
+    db.init_schema()
+
+
+def test_init_schema_migrates_legacy_room_adding_delegation(tmp_path: Path) -> None:
+    # Pre-`delegation_enabled` room table: init_schema() must add the column with
+    # a default of 1 (enabled) and leave existing rows intact.
+    db = Database(tmp_path / "t.db")
+    db.execute(
+        "CREATE TABLE room (id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+        "topic TEXT NOT NULL DEFAULT '', default_reply_mode TEXT NOT NULL, "
+        "archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"
+    )
+    db.execute(
+        "INSERT INTO room (id, name, default_reply_mode, created_at) "
+        "VALUES ('r1','Old','sequential','2026-01-01T00:00:00+00:00')"
+    )
+    assert "delegation_enabled" not in {r["name"] for r in db.query("PRAGMA table_info(room)")}
+
+    db.init_schema()
+
+    assert "delegation_enabled" in {r["name"] for r in db.query("PRAGMA table_info(room)")}
+    assert (
+        db.query("SELECT delegation_enabled FROM room WHERE id = 'r1'")[0]["delegation_enabled"]
+        == 1
+    )
+
+
 def test_foreign_keys_enabled(tmp_path: Path) -> None:
     db = Database(tmp_path / "t.db")
     db.init_schema()

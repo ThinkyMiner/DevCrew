@@ -48,6 +48,10 @@ class Persona(BaseModel):
     name: str
     handle: str
     color: str = "#6aa0ff"
+    # Short, human-facing role label (e.g. "System architect"). Shown next to the
+    # persona name in chat and the manager so you still know what a persona does
+    # after renaming it to a real person's name. Distinct from the system prompt.
+    job: str = ""
     provider: Provider
     model: str
     # maps to claude --effort / codex reasoning effort. The claude CLI flag is
@@ -88,6 +92,10 @@ class Room(BaseModel):
     name: str
     topic: str = ""
     default_reply_mode: ReplyMode = ReplyMode.SEQUENTIAL
+    # When true, a persona's reply that @-mentions another persona delegates a turn
+    # to that persona (auto-adding them to the room if needed), bounded by the
+    # orchestrator's depth/run caps. The per-room off switch.
+    delegation_enabled: bool = True
     archived: bool = False
     created_at: datetime = Field(default_factory=_now)
 

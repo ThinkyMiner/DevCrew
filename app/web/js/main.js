@@ -237,6 +237,24 @@ async function refreshMessages() {
     state.transcript.renderMessages(msgs);
   } catch (e) {
     toast(e.kind, e.message);
+    return;
+  }
+  // Delegation can pull new personas into the room mid-turn; refresh membership
+  // so the header chips and @-mention autocomplete include them. Only re-render
+  // when the member set actually changed (avoids churn on every reconcile).
+  try {
+    const members = await api.listMembers(state.activeRoom.id);
+    const changed =
+      members.length !== state.members.length ||
+      members.some((m, i) => m.id !== state.members[i]?.id);
+    if (changed) {
+      state.members = members;
+      indexPersonas(members);
+      renderHeader();
+      state.composer?.setMembers(members);
+    }
+  } catch {
+    /* non-fatal: rendering already used the all-personas index */
   }
 }
 
