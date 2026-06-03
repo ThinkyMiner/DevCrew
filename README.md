@@ -11,6 +11,21 @@ error points straight to its cause. See [`goal.md`](goal.md) for the vision and
 the seven success criteria, and [`docs/PRD.md`](docs/PRD.md) for the detailed
 requirements.
 
+## Documentation map
+
+**New here / taking over development? Start with
+[`docs/HANDOFF.md`](docs/HANDOFF.md).**
+
+| Doc | What it's for |
+| --- | --- |
+| [`docs/HANDOFF.md`](docs/HANDOFF.md) | **Entry point.** Current status, what's verified vs open, the backlog, and a 15-minute orientation. |
+| [`goal.md`](goal.md) | Vision, the 7 success criteria, and explicit non-goals. |
+| [`docs/PRD.md`](docs/PRD.md) | Requirements (FR-/NFR- IDs), data model, open questions. |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Code map module-by-module, the end-to-end message flow, the invariants, "where to change X". |
+| [`docs/DECISIONS.md`](docs/DECISIONS.md) | Why it's built this way — incl. the live-testing findings. Read before touching the harness/orchestrator. |
+| [`AGENTS.md`](AGENTS.md) | Engineering bar: layering, TDD, fail-loud, definition of done. |
+| [`docs/plans/`](docs/plans/) | The original design doc + the test-first implementation plan (historical). |
+
 ## Prerequisites
 
 - **Python 3.12+** (developed on 3.14).

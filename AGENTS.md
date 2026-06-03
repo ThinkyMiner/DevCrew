@@ -12,12 +12,20 @@ Read this fully before changing code.
 
 Team is a locally-run Python web app: a Slack-style group chat between one human
 operator and configurable AI personas, each backed by a real CLI harness (Claude
-Code or Codex) run as a subprocess. Start with these, in order:
+Code or Codex) run as a subprocess.
+
+**If you are picking up this project, read [`docs/HANDOFF.md`](docs/HANDOFF.md)
+first** — it has the current status, what's verified vs open, and the backlog.
+Then, in order:
 
 1. [`goal.md`](goal.md) — the vision and success criteria.
-2. [`docs/PRD.md`](docs/PRD.md) — the requirements (FR-/NFR- IDs).
-3. [`docs/plans/2026-06-01-team-chat-design.md`](docs/plans/2026-06-01-team-chat-design.md)
-   — the architecture and the rationale behind it.
+2. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the code map, the end-to-end
+   message flow, and the invariants you must not break.
+3. [`docs/DECISIONS.md`](docs/DECISIONS.md) — why it's built this way (read before
+   touching the harness or orchestrator; several were learned under live testing).
+4. [`docs/PRD.md`](docs/PRD.md) — the requirements (FR-/NFR- IDs) + open questions.
+5. [`docs/plans/2026-06-01-team-chat-design.md`](docs/plans/2026-06-01-team-chat-design.md)
+   — the original design doc (historical).
 
 Do not contradict those documents. If the code needs to diverge, update the
 document in the same change and say why.

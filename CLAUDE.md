@@ -10,11 +10,14 @@ guide.
 
 ## Orientation order
 
-1. [`goal.md`](goal.md) — vision & success criteria.
-2. [`docs/PRD.md`](docs/PRD.md) — requirements (FR-/NFR- IDs).
-3. [`docs/plans/2026-06-01-team-chat-design.md`](docs/plans/2026-06-01-team-chat-design.md)
-   — architecture & rationale.
-4. [`AGENTS.md`](AGENTS.md) — how to work here.
+1. [`docs/HANDOFF.md`](docs/HANDOFF.md) — **start here:** current status, what's
+   verified vs open, the backlog, and a 15-minute orientation.
+2. [`goal.md`](goal.md) — vision & success criteria.
+3. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — code map, message flow, invariants.
+4. [`docs/DECISIONS.md`](docs/DECISIONS.md) — why it's built this way (read before
+   touching the harness/orchestrator).
+5. [`docs/PRD.md`](docs/PRD.md) — requirements (FR-/NFR- IDs) + open questions.
+6. [`AGENTS.md`](AGENTS.md) — how to work here (the engineering bar).
 
 ## The one rule to never break
 

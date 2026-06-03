@@ -1,9 +1,11 @@
 # Team — Product Requirements Document
 
-- **Status:** Draft for review
+- **Status:** Implemented & merged (feature-complete vs the requirements below)
 - **Owner:** Kartik
-- **Last updated:** 2026-06-01
-- **Related:** [`goal.md`](../goal.md), [design doc](plans/2026-06-01-team-chat-design.md),
+- **Last updated:** 2026-06-04
+- **Related:** [`goal.md`](../goal.md), [`HANDOFF.md`](HANDOFF.md) (status/backlog),
+  [`ARCHITECTURE.md`](ARCHITECTURE.md) (code map), [`DECISIONS.md`](DECISIONS.md)
+  (rationale), [design doc](plans/2026-06-01-team-chat-design.md),
   [`CLAUDE.md`](../CLAUDE.md), [`AGENTS.md`](../AGENTS.md)
 
 ---
@@ -196,19 +198,32 @@ detailed in the [design doc](plans/2026-06-01-team-chat-design.md).
    path. On failure, an error card is emitted (FR-E2).
 7. Sequential mode: the next persona's delta now includes the prior persona's reply.
 
-## 9. Open questions / to verify during implementation
+## 9. Open questions
 
-- **OQ-1** Exact mechanism to invoke `/compact` and `/clear` against a resumed
-  session in headless mode for each CLI (Claude vs Codex differ). Build behind
-  `supported_commands`; degrade gracefully (FR-C2).
-- **OQ-2** Which usage/context signal each harness emits in stream-json, to power the
-  context indicator (FR-C3).
-- **OQ-3** Codex stream-json event schema vs Claude's — normalize both into the
-  shared `StreamEvent` model in `domain/`.
-- **OQ-4** Attribution lines in the persona prompt are forgeable by message
-  content (a body can contain a fake `[Boss → @x]:` line). Accepted for the
-  local single-user model; revisit if multi-user or untrusted input is added —
-  a structural delimiter/escape scheme is the mitigation.
+> Consolidated and kept current in [`HANDOFF.md`](HANDOFF.md) §4–§5 (with code
+> `TODO(OQ-*)` markers). Status as of 2026-06-04:
+
+- **OQ-1 — OPEN.** Real `/compact` & `/clear` behavior in headless mode. Built
+  behind `supported_commands` and fails loud when unsupported (FR-C2). Claude's
+  `send_command` resumes with the slash command as the prompt (unverified it
+  compacts); Codex declares no compaction command. Verify via `pytest -m live`.
+- **OQ-2 — RESOLVED (by proxy).** Both parsers derive `Usage.context_tokens` from
+  the CLIs' usage events, powering the FR-C3 indicator. Not an authoritative
+  context-window figure, but a usable signal.
+- **OQ-3 — PARTIALLY OPEN.** Codex `codex exec --json` happy-path schema
+  (`agent_message`/`command_execution`/`usage`/`thread_id`) is live-verified and
+  normalized into `StreamEvent`; the `reasoning`/`error`/`mcp_tool_call` shapes are
+  best-effort (tolerant parsing) and whether `-c model_instructions=` applies the
+  persona system prompt is unverified. Claude schema is verified.
+- **OQ-4 — ACCEPTED LIMITATION.** Attribution lines in the persona prompt are
+  forgeable by message content (a body can contain a fake `[Boss → @x]:` line).
+  Fine for the local single-user model; a structural delimiter/escape is the
+  mitigation if multi-user or untrusted input is added.
+- **OQ-5 — OPEN (new).** Personas inherit the operator's user-global Claude Code
+  plugins/hooks and codex's global `~/.codex/AGENTS.md`. Per-persona environment
+  isolation today is cwd-only (a neutral dir outside the repo); the durable fix is
+  an isolated per-persona config dir with credentials copied in. See
+  [`DECISIONS.md`](DECISIONS.md) D9.
 
 ## 10. Out of scope
 
