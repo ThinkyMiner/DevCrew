@@ -9,7 +9,8 @@ services/domain.
 The ``registry`` seam keeps the REAL claude/codex CLIs out of tests: tests pass
 a ``BackendRegistry`` with a :class:`MockHarness` registered, so no test ever
 spawns a real process. When ``registry`` is ``None`` the factory builds the real
-one via :func:`default_registry`.
+one via :func:`build_default_registry`, wiring a neutral scratch dir into the
+real adapters for persona environment isolation.
 
 TeamError -> HTTP mapping is centralized here as FastAPI exception handlers, so
 routes raise/let domain errors propagate and never hand-build error JSON.
@@ -43,7 +44,7 @@ from app.domain.errors import (
     TeamError,
     TranscriptError,
 )
-from app.harness.registry import BackendRegistry, default_registry
+from app.harness.registry import BackendRegistry, build_default_registry
 from app.persistence.db import Database
 from app.persistence.repositories import (
     AuthorRepo,
@@ -91,6 +92,11 @@ def create_app(
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.resolved_logs_dir.mkdir(parents=True, exist_ok=True)
     settings.resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
+    # Neutral scratch dir for persona environment isolation: personas with no
+    # bound working_dir run their claude/codex child here (an empty dir with no
+    # CLAUDE.md/AGENTS.md) instead of the server's project cwd, so they behave per
+    # their configured system prompt rather than as a "Team coding agent".
+    settings.resolved_scratch_dir.mkdir(parents=True, exist_ok=True)
 
     db = Database(settings.resolved_db_path)
     db.init_schema()
@@ -103,7 +109,14 @@ def create_app(
     run_repo = RunRepo(db)
     run_log = RunLogStore(settings.resolved_logs_dir)  # FR-D3 location
 
-    backend_registry = registry if registry is not None else default_registry()
+    # When no registry is injected (production), build the real one with the
+    # scratch dir wired into both adapters for persona isolation. Tests inject
+    # their own MockHarness registry, so the seam is preserved.
+    backend_registry = (
+        registry
+        if registry is not None
+        else build_default_registry(str(settings.resolved_scratch_dir))
+    )
 
     persona_service = PersonaService(persona_repo)
     author_service = AuthorService(author_repo)

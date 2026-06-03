@@ -221,6 +221,40 @@ async def test_run_no_optional_flags_when_unset() -> None:
     assert spawn.cwd is None
 
 
+# -- persona environment isolation (scratch cwd) -------------------------------
+
+
+async def test_scratch_cwd_used_when_no_working_dir() -> None:
+    # With a scratch_dir configured and no spec.working_dir, codex must run in the
+    # neutral scratch dir (both --cd and the spawn cwd) so it does not load the
+    # server project's AGENTS.md.
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = CodexHarness(spawn=spawn, scratch_dir="/neutral/scratch")
+    await _collect(h.run(_spec()))
+    assert spawn.cwd == "/neutral/scratch"
+    assert spawn.argv is not None
+    assert spawn.argv[spawn.argv.index("--cd") + 1] == "/neutral/scratch"
+
+
+async def test_working_dir_overrides_scratch_cwd() -> None:
+    # A persona WITH a bound repo runs there; scratch is ignored.
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = CodexHarness(spawn=spawn, scratch_dir="/neutral/scratch")
+    await _collect(h.run(_spec(working_dir="/work/dir")))
+    assert spawn.cwd == "/work/dir"
+    assert spawn.argv is not None
+    assert spawn.argv[spawn.argv.index("--cd") + 1] == "/work/dir"
+
+
+async def test_no_scratch_dir_preserves_legacy_cwd_behavior() -> None:
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = CodexHarness(spawn=spawn)
+    await _collect(h.run(_spec()))
+    assert spawn.cwd is None
+    assert spawn.argv is not None
+    assert "--cd" not in spawn.argv
+
+
 # -- streaming -----------------------------------------------------------------
 
 

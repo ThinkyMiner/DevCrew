@@ -117,10 +117,13 @@ async def test_run_builds_expected_argv() -> None:
     assert "--print" in argv
     assert argv[argv.index("--output-format") + 1] == "stream-json"
     assert "--verbose" in argv
+    # Persona isolation: --bare skips operator hooks/LSP/plugins (superpowers).
+    assert "--bare" in argv
     assert argv[argv.index("--model") + 1] == "claude-haiku-4-5"
     assert argv[argv.index("--append-system-prompt") + 1] == "you are helpful"
     assert argv[argv.index("--effort") + 1] == "high"
-    assert argv[argv.index("--permission-mode") + 1] == "auto"
+    # AUTO maps to Claude's "acceptEdits" (domain PermissionMode -> claude vocab)
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
     assert argv[argv.index("--add-dir") + 1] == "/work/dir"
     assert "--mcp-config" in argv
     # prompt is the final positional arg
@@ -174,8 +177,90 @@ async def test_run_no_optional_flags_when_unset() -> None:
     assert "--effort" not in argv
     assert "--mcp-config" not in argv
     assert "--add-dir" not in argv
-    # permission-mode always present (defaults to read-only)
-    assert argv[argv.index("--permission-mode") + 1] == "read-only"
+    # permission-mode always present; default READ_ONLY maps to Claude's "plan"
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert spawn.cwd is None
+
+
+async def test_permission_modes_map_to_valid_claude_choices() -> None:
+    """Every domain PermissionMode must map to a value the claude CLI accepts.
+
+    Regression for a bug found by a live smoke: the CLI's --permission-mode
+    rejects our domain values (read-only/ask/auto); allowed choices are
+    acceptEdits, auto, bypassPermissions, default, dontAsk, plan.
+    """
+    valid = {"acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"}
+    expected = {
+        PermissionMode.READ_ONLY: "plan",
+        PermissionMode.ASK: "default",
+        PermissionMode.AUTO: "acceptEdits",
+    }
+    for mode, want in expected.items():
+        spawn = FakeSpawn(FakeProc(_fixture_lines()))
+        h = ClaudeHarness(spawn=spawn)
+        await _collect(h.run(_spec(permission_mode=mode)))
+        assert spawn.argv is not None
+        got = spawn.argv[spawn.argv.index("--permission-mode") + 1]
+        assert got == want and got in valid, f"{mode} -> {got}"
+
+
+async def test_resume_run_includes_bare_flag() -> None:
+    # Persona isolation: --bare must be present on the resume path too.
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = ClaudeHarness(spawn=spawn)
+    await _collect(h.run(_spec(resume_session_id="prev-sess")))
+    assert spawn.argv is not None
+    assert "--bare" in spawn.argv
+
+
+async def test_send_command_resume_argv_includes_bare_flag() -> None:
+    # send_command uses _resume_argv — it must also carry --bare.
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = ClaudeHarness(spawn=spawn)
+    await _collect(h.send_command("sess-1", "/compact"))
+    assert spawn.argv is not None
+    assert "--bare" in spawn.argv
+
+
+# -- persona environment isolation (scratch cwd) -------------------------------
+
+
+async def test_scratch_cwd_used_when_no_working_dir() -> None:
+    # With a scratch_dir configured and no spec.working_dir, the persona's child
+    # must spawn in the neutral scratch dir (NOT the server's project cwd).
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = ClaudeHarness(spawn=spawn, scratch_dir="/neutral/scratch")
+    await _collect(h.run(_spec()))
+    assert spawn.cwd == "/neutral/scratch"
+    # Scratch must NOT be added as a writable --add-dir.
+    assert spawn.argv is not None
+    assert "/neutral/scratch" not in spawn.argv
+
+
+async def test_working_dir_overrides_scratch_cwd() -> None:
+    # A persona WITH a bound repo runs there (intentional repo context); scratch
+    # is ignored and the repo is still passed as --add-dir.
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = ClaudeHarness(spawn=spawn, scratch_dir="/neutral/scratch")
+    await _collect(h.run(_spec(working_dir="/work/dir")))
+    assert spawn.cwd == "/work/dir"
+    assert spawn.argv is not None
+    assert spawn.argv[spawn.argv.index("--add-dir") + 1] == "/work/dir"
+
+
+async def test_send_command_uses_scratch_cwd() -> None:
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = ClaudeHarness(spawn=spawn, scratch_dir="/neutral/scratch")
+    await _collect(h.send_command("sess-1", "/compact"))
+    assert spawn.cwd == "/neutral/scratch"
+
+
+async def test_no_scratch_dir_preserves_legacy_cwd_behavior() -> None:
+    # Back-compat: with no scratch_dir, an unbound persona still spawns with
+    # cwd=None (pre-isolation behavior) so existing tests/usage are unaffected.
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = ClaudeHarness(spawn=spawn)
+    await _collect(h.run(_spec()))
     assert spawn.cwd is None
 
 

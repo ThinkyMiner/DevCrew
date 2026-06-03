@@ -46,6 +46,16 @@ class Settings(BaseSettings):
         assert self.logs_dir is not None  # set by validator
         return self.logs_dir
 
+    @property
+    def resolved_scratch_dir(self) -> Path:
+        """Neutral, EMPTY directory used as the spawn cwd for personas with no
+        bound working_dir (persona environment isolation).
+
+        Must contain no CLAUDE.md/AGENTS.md so a persona's claude/codex child
+        cannot load this repo's project docs. Created by the composition root.
+        """
+        return self.data_dir / "persona-scratch"
+
 
 def default_settings() -> Settings:
     """Build a :class:`Settings` from defaults + environment (the factory)."""

@@ -10,8 +10,12 @@ venv/
 
 # App data — runtime DB and harness run logs (never commit)
 data/*.db
+data/*.db-shm
+data/*.db-wal
 data/*.sqlite3
 data/logs/
+# Neutral persona-isolation scratch dir (created at startup; never commit)
+data/persona-scratch/
 # Dev mock launcher data dir + browser-verification artifacts
 data-dev/
 .playwright-mcp/

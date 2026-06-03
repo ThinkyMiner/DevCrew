@@ -245,10 +245,33 @@ class CodexHarness:
         spawn: Spawn = _default_spawn,
         codex_bin: str = "codex",
         timeout: float = _DEFAULT_TIMEOUT,
+        scratch_dir: str | None = None,
     ) -> None:
         self._spawn = spawn
         self._codex_bin = codex_bin
         self._timeout = timeout
+        # Persona environment isolation: a NEUTRAL, empty directory (no
+        # AGENTS.md) used as the working root / spawn cwd when a persona has no
+        # bound working_dir. Without it the codex child inherits the server's cwd
+        # (this repo) and loads the cwd AGENTS.md, contaminating the persona.
+        # A persona WITH a working_dir still runs there (user wants that context).
+        # When None, current behavior is preserved (back-compat for tests).
+        #
+        # TODO(OQ/codex-global-agents): neutral cwd stops *cwd* AGENTS.md from
+        # leaking, but `codex exec` ALSO reads the GLOBAL ~/.codex/AGENTS.md and
+        # the operator's ~/.codex/config.toml (skills/plugins/hooks). There is no
+        # clean exec flag that drops the global AGENTS.md while keeping ChatGPT
+        # auth working: `--ignore-user-config` skips config.toml but its docs say
+        # it does NOT cover AGENTS.md, and it also resets the model default
+        # (breaking the run). So global ~/.codex/AGENTS.md contamination of codex
+        # personas is a known residual limitation surfaced to the operator.
+        self._scratch_dir = scratch_dir
+
+    def _spawn_cwd(self, spec: RunSpec) -> str | None:
+        """Resolve the spawn cwd: the bound repo if set, else the neutral scratch."""
+        if spec.working_dir:
+            return spec.working_dir
+        return self._scratch_dir
 
     # -- argv construction ------------------------------------------------------
 
@@ -271,8 +294,12 @@ class CodexHarness:
         flags: list[str] = self._base_flags()
         flags += ["--model", spec.model]
         flags += ["--sandbox", _SANDBOX_FOR_MODE.get(spec.permission_mode, "read-only")]
-        if spec.working_dir:
-            flags += ["--cd", spec.working_dir]
+        # Persona isolation: --cd the bound repo if set, else the neutral scratch
+        # dir (NOT the server's project cwd, which would load that repo's
+        # AGENTS.md). See __init__ for the residual global-AGENTS.md limitation.
+        cwd = self._spawn_cwd(spec)
+        if cwd:
+            flags += ["--cd", cwd]
         if spec.effort:
             # No --effort flag; Codex takes reasoning effort via a config override.
             flags += ["-c", f"model_reasoning_effort={spec.effort}"]
@@ -367,7 +394,7 @@ class CodexHarness:
         ``RunError`` event is the orchestrator's responsibility (Unit 8).
         """
         argv = self._build_argv(spec, spec.prompt)
-        inner = self._stream(argv, spec.working_dir, spec.resume_session_id)
+        inner = self._stream(argv, self._spawn_cwd(spec), spec.resume_session_id)
         # Explicitly close the inner generator on every exit so its finally — and
         # thus proc.kill() — runs deterministically rather than only at GC.
         try:
@@ -402,7 +429,9 @@ class CodexHarness:
             "--",
             command,
         ]
-        inner = self._stream(argv, None, session_id)
+        # Neutral scratch cwd (no RunSpec/working_dir here) — persona isolation,
+        # same rationale as run().
+        inner = self._stream(argv, self._scratch_dir, session_id)
         try:
             async for event in inner:
                 yield event

@@ -8,7 +8,11 @@ from app.harness.base import AgentBackend
 from app.harness.claude import ClaudeHarness
 from app.harness.codex import CodexHarness
 from app.harness.mock import MockHarness
-from app.harness.registry import BackendRegistry, default_registry
+from app.harness.registry import (
+    BackendRegistry,
+    build_default_registry,
+    default_registry,
+)
 
 
 def test_register_and_get_mock() -> None:
@@ -67,3 +71,22 @@ def test_default_registry_returns_independent_instances() -> None:
     # Each call builds a fresh registry so tests cannot leak registrations into
     # one another (avoid global mutable surprises).
     assert default_registry() is not default_registry()
+
+
+def test_build_default_registry_threads_scratch_dir_into_adapters() -> None:
+    # Persona isolation: the scratch dir must reach BOTH real adapters so an
+    # unbound persona spawns its child in the neutral dir.
+    reg = build_default_registry("/neutral/scratch")
+    claude = reg.get_backend(Provider.CLAUDE)
+    codex = reg.get_backend(Provider.CODEX)
+    assert isinstance(claude, ClaudeHarness)
+    assert isinstance(codex, CodexHarness)
+    assert claude._scratch_dir == "/neutral/scratch"
+    assert codex._scratch_dir == "/neutral/scratch"
+
+
+def test_build_default_registry_defaults_to_no_scratch() -> None:
+    reg = build_default_registry()
+    claude = reg.get_backend(Provider.CLAUDE)
+    assert isinstance(claude, ClaudeHarness)
+    assert claude._scratch_dir is None

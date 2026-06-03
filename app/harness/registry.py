@@ -45,14 +45,26 @@ class BackendRegistry:
             ) from exc
 
 
-def default_registry() -> BackendRegistry:
+def build_default_registry(scratch_dir: str | None = None) -> BackendRegistry:
     """Build a fresh registry wired with the real CLI adapters.
 
     ``CLAUDE`` -> :class:`ClaudeHarness`, ``CODEX`` -> :class:`CodexHarness`.
     ``MOCK`` is intentionally left unregistered (tests inject it) so a mock
     backend can never be shipped by accident.
+
+    ``scratch_dir`` is the neutral, empty directory used as the spawn cwd for
+    personas with no bound ``working_dir`` (persona environment isolation). The
+    composition root passes its ``settings.resolved_scratch_dir`` here so an
+    advisory persona's claude/codex child runs in a doc-free directory instead of
+    the server's project cwd. When ``None``, the adapters fall back to their
+    pre-isolation behavior (back-compat).
     """
     registry = BackendRegistry()
-    registry.register(Provider.CLAUDE, ClaudeHarness())
-    registry.register(Provider.CODEX, CodexHarness())
+    registry.register(Provider.CLAUDE, ClaudeHarness(scratch_dir=scratch_dir))
+    registry.register(Provider.CODEX, CodexHarness(scratch_dir=scratch_dir))
     return registry
+
+
+def default_registry() -> BackendRegistry:
+    """Back-compat alias for :func:`build_default_registry` with no scratch dir."""
+    return build_default_registry()

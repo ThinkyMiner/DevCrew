@@ -24,10 +24,43 @@ from typing import Protocol, runtime_checkable
 
 from app.domain.errors import HarnessAuthError, HarnessError, HarnessTimeout
 from app.domain.events import RunDone, StreamEvent
+from app.domain.models import PermissionMode
 from app.harness.base import RunSpec
 from app.harness.claude_parser import parse_claude_line, session_id_of
 
 _DEFAULT_TIMEOUT = 600.0
+
+# Persona environment isolation flags (verified live against claude-cli 2.1.159).
+# Applied to EVERY invocation (initial run + resume) so a persona behaves ONLY per
+# its configured --append-system-prompt, never as the operator's "Team coding
+# agent":
+#   --bare               "Minimal mode: skip hooks, LSP, plugins" (from
+#                        `claude --help`). Kills the operator's SessionStart hooks
+#                        and the superpowers plugin's skill-injection ("Using
+#                        systematic-debugging ...") that was polluting replies.
+#   --setting-sources "" Load NONE of the user/project/local setting sources
+#                        (default loads all three). Verified: with --bare alone
+#                        the init event still listed 11 operator plugins; adding
+#                        an empty --setting-sources drops loaded plugins to 0, so
+#                        the operator's global Claude Code config cannot leak in.
+# (The neutral spawn cwd — see ClaudeHarness._spawn_cwd — handles the OTHER half:
+# not loading this repo's CLAUDE.md/AGENTS.md when the persona has no working_dir.)
+_ISOLATION_FLAGS = ["--bare", "--setting-sources", ""]
+
+# The domain PermissionMode is provider-agnostic (read-only/ask/auto); the Claude
+# CLI's `--permission-mode` accepts a DIFFERENT vocabulary (verified against
+# claude-cli 2.1.159: acceptEdits, auto, bypassPermissions, default, dontAsk,
+# plan). Map our intent onto Claude's real choices, mirroring how CodexHarness
+# maps PermissionMode onto codex's --sandbox values:
+#   READ_ONLY -> "plan"        (Claude's only mode that cannot edit/execute; it
+#                               reads/analyzes and answers without making changes)
+#   ASK       -> "default"     (prompts before acting on tools)
+#   AUTO      -> "acceptEdits"  (proceeds without prompting for edits)
+_PERMISSION_MODE_FOR_CLAUDE: dict[PermissionMode, str] = {
+    PermissionMode.READ_ONLY: "plan",
+    PermissionMode.ASK: "default",
+    PermissionMode.AUTO: "acceptEdits",
+}
 
 # Patterns that flag stderr/auth failures requiring re-login rather than a retry.
 _AUTH_PATTERNS = (
@@ -214,10 +247,30 @@ class ClaudeHarness:
         spawn: Spawn = _default_spawn,
         claude_bin: str = "claude",
         timeout: float = _DEFAULT_TIMEOUT,
+        scratch_dir: str | None = None,
     ) -> None:
         self._spawn = spawn
         self._claude_bin = claude_bin
         self._timeout = timeout
+        # Persona environment isolation: a NEUTRAL, empty directory (no
+        # CLAUDE.md/AGENTS.md) used as the spawn cwd when a persona has no bound
+        # working_dir. Without it, the claude child inherits the server's cwd
+        # (this repo) and loads our project docs, behaving like a "Team coding
+        # agent" instead of its configured advisor persona. A persona WITH a
+        # working_dir still runs there (the user wants that repo's context).
+        # When None, current behavior is preserved (back-compat for tests); the
+        # composition root passes a real scratch dir.
+        self._scratch_dir = scratch_dir
+
+    def _spawn_cwd(self, spec: RunSpec) -> str | None:
+        """Resolve the spawn cwd: the bound repo if set, else the neutral scratch.
+
+        Persona isolation (verified live): with no working_dir we must NOT run in
+        the server's project cwd (it would load this repo's CLAUDE.md/AGENTS.md).
+        """
+        if spec.working_dir:
+            return spec.working_dir
+        return self._scratch_dir
 
     # -- argv construction ------------------------------------------------------
 
@@ -246,6 +299,8 @@ class ClaudeHarness:
             "--output-format",
             "stream-json",
             "--verbose",
+            # Persona isolation (verified live bug fix) — see _ISOLATION_FLAGS.
+            *_ISOLATION_FLAGS,
             "--model",
             spec.model,
         ]
@@ -259,7 +314,7 @@ class ClaudeHarness:
             # xhigh, max). This is NOT an unverified open question — no hard
             # validation here, the CLI rejects unknown levels fail-loud.
             argv += ["--effort", spec.effort]
-        argv += ["--permission-mode", spec.permission_mode.value]
+        argv += ["--permission-mode", _PERMISSION_MODE_FOR_CLAUDE[spec.permission_mode]]
         if spec.working_dir:
             argv += ["--add-dir", spec.working_dir]
         argv += self._mcp_args(spec.mcp_servers)
@@ -278,6 +333,9 @@ class ClaudeHarness:
             "--output-format",
             "stream-json",
             "--verbose",
+            # Persona isolation on resume too (so a /compact or /clear over an
+            # existing session stays uncontaminated) — see _ISOLATION_FLAGS.
+            *_ISOLATION_FLAGS,
             "--resume",
             session_id,
             # End-of-options separator (C1): guards the command positional so it
@@ -350,7 +408,7 @@ class ClaudeHarness:
         threaded at the orchestrator layer, not here.
         """
         argv = self._build_argv(spec, spec.prompt)
-        inner = self._stream(argv, spec.working_dir, spec.resume_session_id)
+        inner = self._stream(argv, self._spawn_cwd(spec), spec.resume_session_id)
         # Explicitly close the inner generator on every exit (incl. the consumer
         # abandoning us via aclose/GeneratorExit) so its finally — and thus
         # proc.kill() — runs deterministically rather than only at GC (C2).
@@ -371,7 +429,10 @@ class ClaudeHarness:
         # as the prompt; if Claude does not honor it this must degrade
         # gracefully (it will still stream/terminate normally rather than hang).
         argv = self._resume_argv(session_id, command)
-        inner = self._stream(argv, None, session_id)
+        # No RunSpec here (no working_dir), so use the neutral scratch dir as cwd
+        # rather than the server's project cwd — same persona-isolation rationale
+        # as run() (avoids loading this repo's CLAUDE.md/AGENTS.md).
+        inner = self._stream(argv, self._scratch_dir, session_id)
         try:
             async for event in inner:
                 yield event
