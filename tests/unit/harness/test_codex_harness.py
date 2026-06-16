@@ -128,6 +128,39 @@ async def test_run_builds_expected_argv() -> None:
     assert spawn.cwd == "/work/dir"
 
 
+async def test_web_search_tool_enables_search_flag_before_exec() -> None:
+    # A codex persona whose allowed_tools include a web-search marker runs with the
+    # top-level `--search` flag (which must precede the `exec` subcommand), enabling
+    # codex's native web_search tool.
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = CodexHarness(spawn=spawn)
+    await _collect(h.run(_spec(allowed_tools=["web_search"])))
+    argv = spawn.argv
+    assert argv is not None
+    assert argv[0] == "codex"
+    assert argv[1] == "--search"  # global flag BEFORE the subcommand
+    assert argv[2] == "exec"
+
+
+async def test_web_search_marker_is_normalized() -> None:
+    # Accept common spellings from the allowed-tools picker.
+    for marker in ["WebSearch", "web search", "web-search"]:
+        spawn = FakeSpawn(FakeProc(_fixture_lines()))
+        h = CodexHarness(spawn=spawn)
+        await _collect(h.run(_spec(allowed_tools=[marker])))
+        assert spawn.argv is not None and "--search" in spawn.argv, marker
+
+
+async def test_no_web_search_flag_without_marker() -> None:
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = CodexHarness(spawn=spawn)
+    await _collect(h.run(_spec(allowed_tools=["Read", "Bash"])))
+    argv = spawn.argv
+    assert argv is not None
+    assert "--search" not in argv
+    assert argv[1] == "exec"  # unchanged when web search not requested
+
+
 async def test_run_read_only_maps_to_read_only_sandbox() -> None:
     spawn = FakeSpawn(FakeProc(_fixture_lines()))
     h = CodexHarness(spawn=spawn)

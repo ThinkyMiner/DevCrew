@@ -23,9 +23,11 @@ export const MODEL_SUGGESTIONS = {
   mock: ["mock"],
 };
 
-// Common tool names to offer in the allowed-tools picker (claude-oriented; the
-// field is not currently enforced by either CLI, so this is a convenience list
-// and custom entries are always allowed).
+// Common tool names to offer in the allowed-tools picker (claude-oriented). These
+// are PRE-APPROVED for the persona: claude maps them to `--allowedTools` (so a
+// headless run never has to prompt the operator, which it cannot do), and codex
+// maps a WebSearch entry to its native `--search`. The list is just a convenience
+// — custom entries are always allowed, including scoped commands like "Bash(git *)".
 export const TOOL_SUGGESTIONS = [
   "Read",
   "Edit",
@@ -76,4 +78,18 @@ export function mcpSuggestionsFrom(personas = []) {
  */
 export function withSelected(suggestions, selected = []) {
   return dedupe([...suggestions, ...selected]);
+}
+
+/**
+ * Collapse a human label like "opus 4.8" to the CLI alias "opus" so a spaced
+ * label never gets stored/sent as a model (the CLI rejects it). Mirrors
+ * ClaudeHarness._normalize_model. A bare alias or full id passes through.
+ */
+export function normalizeModel(model) {
+  const stripped = String(model ?? "").trim();
+  const head = stripped.split(/\s+/)[0].toLowerCase();
+  if (/\s/.test(stripped) && ["opus", "sonnet", "haiku"].includes(head)) {
+    return head;
+  }
+  return stripped;
 }

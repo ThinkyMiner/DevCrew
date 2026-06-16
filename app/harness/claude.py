@@ -298,6 +298,44 @@ class ClaudeHarness:
         config: dict[str, object] = {"mcpServers": {name: {} for name in mcp_servers}}
         return ["--mcp-config", json.dumps(config)]
 
+    @staticmethod
+    def _allowed_tools_args(allowed_tools: list[str]) -> list[str]:
+        """Build ``--allowedTools`` from a persona's ``allowed_tools``.
+
+        Headless ``claude --print`` cannot prompt the operator for a tool
+        permission (there is no terminal to answer on the webpage), so any tool
+        that would otherwise require approval — WebSearch, WebFetch, Bash, … — is
+        blocked unless pre-approved here. ``--allowedTools`` grants exactly the
+        tools the operator chose in the persona editor, no prompt required.
+
+        Emitted as ONE comma-separated value (the CLI accepts "comma or
+        space-separated"): a scoped entry like ``Bash(git *)`` contains a space,
+        so passing the list as separate argv items would split it — and a
+        variadic ``<tools...>`` flag could also greedily swallow the flags that
+        follow. A single token sidesteps both. Empty list -> no flag.
+        """
+        cleaned = [t.strip() for t in allowed_tools if t and t.strip()]
+        if not cleaned:
+            return []
+        return ["--allowedTools", ",".join(cleaned)]
+
+    @staticmethod
+    def _normalize_model(model: str) -> str:
+        """Collapse a human label like ``"opus 4.8"`` to the CLI alias ``"opus"``.
+
+        The Claude CLI's ``--model`` accepts aliases (``opus``/``sonnet``/``haiku``)
+        or full ids (``claude-opus-4-8``) — NOT a spaced label like ``"opus 4.8"``,
+        which it rejects ("model … may not exist"). This is the last line of
+        defence: whatever a persona's stored model is (UI, API, or legacy seed), a
+        ``"<alias> <version…>"`` string is reduced to the bare alias here so the
+        CLI never chokes. Anything else (a bare alias, a full id) passes through.
+        """
+        stripped = model.strip()
+        head = stripped.split()[0].lower() if stripped.split() else stripped
+        if " " in stripped and head in {"opus", "sonnet", "haiku"}:
+            return head
+        return stripped
+
     def _build_argv(self, spec: RunSpec, prompt: str) -> list[str]:
         argv = [
             self._claude_bin,
@@ -308,7 +346,7 @@ class ClaudeHarness:
             # Persona isolation (verified live bug fix) — see _ISOLATION_FLAGS.
             *_ISOLATION_FLAGS,
             "--model",
-            spec.model,
+            self._normalize_model(spec.model),
         ]
         if spec.resume_session_id:
             argv += ["--resume", spec.resume_session_id]
@@ -321,6 +359,9 @@ class ClaudeHarness:
             # validation here, the CLI rejects unknown levels fail-loud.
             argv += ["--effort", spec.effort]
         argv += ["--permission-mode", _PERMISSION_MODE_FOR_CLAUDE[spec.permission_mode]]
+        # Pre-approve the persona's chosen tools (WebSearch, Bash, …): headless
+        # --print mode cannot prompt the operator, so without this they are blocked.
+        argv += self._allowed_tools_args(spec.allowed_tools)
         if spec.working_dir:
             argv += ["--add-dir", spec.working_dir]
         argv += self._mcp_args(spec.mcp_servers)

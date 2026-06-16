@@ -56,7 +56,10 @@ PRD translates them into concrete requirements.
   level, system prompt (personality + role), MCP server set, allowed tools,
   optional working directory, and permission mode (`read-only` | `ask` | `auto`).
   The editor presents model/effort as dropdowns (model is typeable for
-  forward-compat) and allowed-tools/MCP as multi-select pickers.
+  forward-compat) and allowed-tools/MCP as multi-select pickers. Allowed-tools are
+  stored-but-not-enforced with ONE exception: a `web_search` entry on a **codex**
+  persona enables codex's native web search (`codex --search`; see
+  [`DECISIONS.md`](DECISIONS.md) D14).
 - **FR-P3** Persona templates: save a configured persona as a reusable template.
 - **FR-P4** A persona may belong to multiple rooms; it holds a **separate session
   per room** (see FR-S1).

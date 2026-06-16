@@ -165,6 +165,24 @@ the UI card → `RunRecord` → `data/logs/.../<run_id>.jsonl` → reproduce-in-
 
 - **Why:** the operator's stated top priority is "errors easy to find."
 
+## D14. Codex web search is enabled by a `web_search` entry in `allowed_tools`
+
+`allowed_tools` is otherwise stored-but-not-enforced (operator's choice), with one
+exception: if a **codex** persona's `allowed_tools` contains a web-search marker
+(`web_search`/`WebSearch`/`web search`/`web-search`, normalised to alphanumerics),
+the adapter prepends the top-level `--search` flag (`codex --search exec …`),
+enabling codex's native `web_search` tool.
+
+- **Why this shape:** `--search` is a *global* codex flag — `codex --search exec`
+  parses but `codex exec --search` errors (verified, codex-cli 0.130.0) — so it
+  goes before the subcommand, and there is no exec-level flag or stable config key
+  to use instead. Gating on `allowed_tools` ties it to the existing picker rather
+  than inventing a new persona field, and keeps it per-persona/opt-in.
+- **Consequence:** only the wiring (config → argv) is unit-verified; that codex
+  actually performs a live search and returns sourced output is a live behaviour
+  to confirm with a real run (OQ-style, like the other live checks). Claude's web
+  search is separate (its own tools/MCP) and not covered here.
+
 ## D13. Persona-to-persona delegation reuses `@`-routing — bounded, no second loop
 
 A persona's reply that `@`-mentions another persona delegates a turn to that

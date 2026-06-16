@@ -19,6 +19,7 @@ import {
   modelSuggestionsFor,
   mcpSuggestionsFrom,
   withSelected,
+  normalizeModel,
 } from "./persona_fields.js";
 
 const PROVIDERS = ["claude", "codex", "mock"];
@@ -232,7 +233,7 @@ export function openPersonaEditor({ persona, onSaved, allPersonas = [] }) {
       job: f.job.value.trim(),
       color: f.color.value,
       provider: f.provider.value,
-      model: f.model.value.trim(),
+      model: normalizeModel(f.model.value),
       effort: f.effort.value.trim() || null,
       system_prompt: f.system_prompt.value,
       mcp_servers: mcpPick.getValues(),

@@ -13,6 +13,7 @@ import {
   modelSuggestionsFor,
   mcpSuggestionsFrom,
   withSelected,
+  normalizeModel,
 } from "../../app/web/js/persona_fields.js";
 
 test("effort levels cover the CLI-valid set", () => {
@@ -58,4 +59,17 @@ test("mcpSuggestionsFrom unions all personas' mcp servers, deduped", () => {
 test("withSelected appends already-selected values not in the suggestion list", () => {
   const got = withSelected(["Read", "Edit"], ["Edit", "CustomTool"]);
   assert.deepEqual(got, ["Read", "Edit", "CustomTool"]); // suggestions first, extras after, no dup
+});
+
+test("normalizeModel collapses an alias+version label to the bare alias", () => {
+  assert.equal(normalizeModel("opus 4.8"), "opus");
+  assert.equal(normalizeModel("Opus 4.8 (1M context)"), "opus");
+  assert.equal(normalizeModel("sonnet 4.6"), "sonnet");
+  assert.equal(normalizeModel("  haiku   4.5 "), "haiku");
+});
+
+test("normalizeModel leaves valid model strings unchanged", () => {
+  for (const valid of ["opus", "sonnet", "haiku", "claude-opus-4-8", "gpt-5.5", ""]) {
+    assert.equal(normalizeModel(valid), valid);
+  }
 });

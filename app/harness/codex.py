@@ -313,7 +313,31 @@ class CodexHarness:
         # mapped here. Documented limitation.
         return flags
 
+    @staticmethod
+    def _wants_web_search(spec: RunSpec) -> bool:
+        """True if the persona's allowed_tools request web search.
+
+        Accepts the common spellings the allowed-tools picker may produce
+        (``web_search``, ``WebSearch``, ``web search``, ``web-search``) by
+        normalising to alphanumerics. This is the one allowed_tools entry the
+        codex adapter acts on — it maps to codex's native web_search tool.
+        """
+        return any(
+            "".join(ch for ch in tool.lower() if ch.isalnum()) == "websearch"
+            for tool in spec.allowed_tools
+        )
+
+    def _global_flags(self, spec: RunSpec) -> list[str]:
+        """Top-level codex flags that must precede the ``exec`` subcommand.
+
+        ``--search`` enables codex's native web_search tool and is a GLOBAL flag:
+        ``codex --search exec …`` parses, ``codex exec --search`` does not
+        (verified against codex-cli 0.130.0).
+        """
+        return ["--search"] if self._wants_web_search(spec) else []
+
     def _build_argv(self, spec: RunSpec, prompt: str) -> list[str]:
+        glob = self._global_flags(spec)
         if spec.resume_session_id:
             # `codex exec resume <SESSION_ID> -- [PROMPT]` — flags go before the
             # subcommand args. The literal "--" (C1) marks end-of-options so a
@@ -324,6 +348,7 @@ class CodexHarness:
             # the version.
             return [
                 self._codex_bin,
+                *glob,
                 "exec",
                 *self._common_flags(spec),
                 "resume",
@@ -331,7 +356,7 @@ class CodexHarness:
                 "--",
                 prompt,
             ]
-        return [self._codex_bin, "exec", *self._common_flags(spec), "--", prompt]
+        return [self._codex_bin, *glob, "exec", *self._common_flags(spec), "--", prompt]
 
     # -- streaming core ---------------------------------------------------------
 

@@ -88,7 +88,8 @@ class TimeoutProc:
 
 
 def _spec(prompt: str = "hello", **kw: object) -> RunSpec:
-    return RunSpec(prompt=prompt, provider=Provider.CLAUDE, model="claude-haiku-4-5", **kw)  # type: ignore[arg-type]
+    model = kw.pop("model", "claude-haiku-4-5")
+    return RunSpec(prompt=prompt, provider=Provider.CLAUDE, model=model, **kw)  # type: ignore[arg-type]
 
 
 async def _collect(agen: AsyncIterator[StreamEvent]) -> list[StreamEvent]:
@@ -96,6 +97,28 @@ async def _collect(agen: AsyncIterator[StreamEvent]) -> list[StreamEvent]:
 
 
 # -- argv ----------------------------------------------------------------------
+
+
+async def test_model_label_with_version_is_normalized_to_alias() -> None:
+    # Defensive: a human label like "opus 4.8" is NOT a valid --model value; the
+    # adapter collapses a "<alias> <version…>" string to the bare alias so the CLI
+    # never sees it (covers legacy/seeded data regardless of how it was created).
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = ClaudeHarness(spawn=spawn)
+    await _collect(h.run(_spec(model="opus 4.8")))
+    argv = spawn.argv
+    assert argv is not None
+    assert argv[argv.index("--model") + 1] == "opus"
+
+
+async def test_valid_model_strings_pass_through_unchanged() -> None:
+    for valid in ["opus", "sonnet", "haiku", "claude-opus-4-8"]:
+        spawn = FakeSpawn(FakeProc(_fixture_lines()))
+        h = ClaudeHarness(spawn=spawn)
+        await _collect(h.run(_spec(model=valid)))
+        argv = spawn.argv
+        assert argv is not None
+        assert argv[argv.index("--model") + 1] == valid, valid
 
 
 async def test_run_builds_expected_argv() -> None:
@@ -131,6 +154,28 @@ async def test_run_builds_expected_argv() -> None:
     assert argv[-1] == "do the thing"
     # working_dir is also passed as cwd
     assert spawn.cwd == "/work/dir"
+
+
+async def test_allowed_tools_passed_as_comma_separated_allowedtools() -> None:
+    # The bug: a persona's allowed_tools (e.g. WebSearch) never reached the CLI, so
+    # headless `claude --print` (which cannot prompt the operator) blocked the tool.
+    # Fix: emit `--allowedTools` so the listed tools are pre-approved without a
+    # prompt. Comma-separated single value so a scoped entry like "Bash(git *)"
+    # (which contains a space) is not split into separate args.
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = ClaudeHarness(spawn=spawn)
+    await _collect(h.run(_spec(allowed_tools=["WebSearch", "Bash(git *)"])))
+    argv = spawn.argv
+    assert argv is not None
+    assert argv[argv.index("--allowedTools") + 1] == "WebSearch,Bash(git *)"
+
+
+async def test_no_allowed_tools_omits_allowedtools_flag() -> None:
+    spawn = FakeSpawn(FakeProc(_fixture_lines()))
+    h = ClaudeHarness(spawn=spawn)
+    await _collect(h.run(_spec()))
+    assert spawn.argv is not None
+    assert "--allowedTools" not in spawn.argv
 
 
 async def test_run_resume_adds_resume_flag() -> None:
@@ -178,6 +223,7 @@ async def test_run_no_optional_flags_when_unset() -> None:
     assert "--effort" not in argv
     assert "--mcp-config" not in argv
     assert "--add-dir" not in argv
+    assert "--allowedTools" not in argv
     # permission-mode always present; default READ_ONLY maps to Claude's "plan"
     assert argv[argv.index("--permission-mode") + 1] == "plan"
     assert spawn.cwd is None
