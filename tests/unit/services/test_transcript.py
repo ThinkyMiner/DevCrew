@@ -1,8 +1,13 @@
 import pytest
 
 from app.domain.errors import TranscriptError
-from app.domain.models import AuthorKind, Message
-from app.services.transcript import build_delta, delta_messages, render_quotes
+from app.domain.models import AuthorKind, HumanAuthor, Message
+from app.services.transcript import (
+    assemble_context,
+    build_delta,
+    delta_messages,
+    render_quotes,
+)
 
 
 def _name_of(kind: AuthorKind, ref: str) -> str:
@@ -141,3 +146,81 @@ def test_render_quotes_multiple_blocks_blank_separated() -> None:
     q2 = _msg("kartik", AuthorKind.HUMAN, "second quote", "q2")
     out = render_quotes([q1, q2], _name_of)
     assert out == "[@researcher]:\n  > first quote\n\n[Kartik]:\n  > second quote"
+
+
+# --- assemble_context (the deep seam: slice once, dedup, assemble) -------
+
+
+def test_assemble_context_composes_delta_then_directed_line() -> None:
+    newer = _msg("res", AuthorKind.PERSONA, "new line", "m2")
+    out = assemble_context(
+        [_msg("kartik", AuthorKind.HUMAN, "old", "m1"), newer],
+        "m1",  # delta = [m2]
+        quoted_messages=[],
+        persona_handle="architect",
+        author=HumanAuthor(name="Kartik"),
+        new_text="go",
+        name_of=_name_of,
+    )
+    assert out == "[@researcher]: new line\n\n[Kartik → @architect]: go"
+
+
+def test_assemble_context_renders_quote_outside_delta() -> None:
+    quote = _msg("kartik", AuthorKind.HUMAN, "quoted old", "q1")
+    out = assemble_context(
+        [_msg("res", AuthorKind.PERSONA, "new line", "m2")],
+        None,
+        quoted_messages=[quote],
+        persona_handle="architect",
+        author=HumanAuthor(name="Kartik"),
+        new_text="go",
+        name_of=_name_of,
+    )
+    assert "  > quoted old" in out  # rendered as a blockquote
+    assert "[@researcher]: new line" in out
+
+
+def test_assemble_context_dedupes_quote_already_in_delta() -> None:
+    # The M4-killing case: a message that is BOTH in the delta and quoted must
+    # appear once (as the delta line), never also as a blockquote. Because the
+    # slice is taken once and shared, dedup can't drift from the rendered delta.
+    shared = _msg("res", AuthorKind.PERSONA, "shared msg", "m1")
+    out = assemble_context(
+        [shared],
+        None,  # delta includes m1
+        quoted_messages=[shared],
+        persona_handle="architect",
+        author=HumanAuthor(name="Kartik"),
+        new_text="go",
+        name_of=_name_of,
+    )
+    assert out.count("shared msg") == 1
+    assert "  > shared msg" not in out
+
+
+def test_assemble_context_prepends_enabled_weight_note() -> None:
+    author = HumanAuthor(name="Boss", weight_note="be terse", weight_enabled=True)
+    out = assemble_context(
+        [],
+        None,
+        quoted_messages=[],
+        persona_handle="architect",
+        author=author,
+        new_text="go",
+        name_of=_name_of,
+    )
+    assert out.startswith("[Author note — Boss]: be terse")
+    assert out.endswith("[Boss → @architect]: go")
+
+
+def test_assemble_context_unknown_pointer_raises() -> None:
+    with pytest.raises(TranscriptError):
+        assemble_context(
+            [_msg("kartik", AuthorKind.HUMAN, "a", "m1")],
+            "m99",
+            quoted_messages=[],
+            persona_handle="architect",
+            author=HumanAuthor(name="Kartik"),
+            new_text="x",
+            name_of=_name_of,
+        )

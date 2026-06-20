@@ -28,8 +28,9 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 from app.domain.errors import TranscriptError
-from app.domain.models import AuthorKind, Message
+from app.domain.models import AuthorKind, HumanAuthor, Message
 from app.services.mentions import find_mentions
+from app.services.prompt import assemble_prompt
 
 NameResolver = Callable[[AuthorKind, str], str]
 
@@ -81,6 +82,25 @@ def delta_messages(messages: Sequence[Message], last_seen_id: str | None) -> lis
     return list(messages[cut + 1 :])
 
 
+def render_delta(
+    delta: Sequence[Message],
+    *,
+    persona_handle: str,
+    name_of: NameResolver,
+) -> str:
+    """Render an already-sliced sequence of messages as attributed lines.
+
+    A message directed at this persona (via ``@<persona_handle>`` or
+    ``@everyone``) is rendered with the ``→ @<handle>`` form; the persona's own
+    past messages are still included, attributed by name. Returns ``""`` for an
+    empty slice. Slicing is the caller's job (see :func:`delta_messages`) so the
+    slice can be reused without re-deriving it.
+    """
+    if not delta:
+        return ""
+    return "\n".join(_attribute(m, persona_handle, name_of) for m in delta)
+
+
 def build_delta(
     messages: Sequence[Message],
     last_seen_id: str | None,
@@ -90,19 +110,15 @@ def build_delta(
 ) -> str:
     """Render the attributed block of messages strictly after ``last_seen_id``.
 
-    Slicing is delegated to :func:`delta_messages` (the shared single source of
-    truth), so a stale/foreign pointer raises :class:`TranscriptError` rather
-    than silently dumping full history (AGENTS §4: no silent fallbacks).
-
-    A message directed at this persona (via ``@<persona_handle>`` or
-    ``@everyone``) is rendered with the ``→ @<handle>`` form; the persona's own
-    past messages are still included, attributed by name. Returns ``""`` when
-    nothing is new.
+    Thin composition of :func:`delta_messages` (the shared slice) and
+    :func:`render_delta`. A stale/foreign pointer raises :class:`TranscriptError`
+    rather than silently dumping full history (AGENTS §4: no silent fallbacks).
     """
-    delta = delta_messages(messages, last_seen_id)
-    if not delta:
-        return ""
-    return "\n".join(_attribute(m, persona_handle, name_of) for m in delta)
+    return render_delta(
+        delta_messages(messages, last_seen_id),
+        persona_handle=persona_handle,
+        name_of=name_of,
+    )
 
 
 def render_quotes(quoted_messages: Sequence[Message], name_of: NameResolver) -> str:
@@ -124,3 +140,41 @@ def render_quotes(quoted_messages: Sequence[Message], name_of: NameResolver) -> 
         quoted = "\n".join(f"  > {line}" for line in m.content.split("\n"))
         blocks.append(f"[{display}]:\n{quoted}")
     return "\n\n".join(blocks)
+
+
+def assemble_context(
+    messages: Sequence[Message],
+    last_seen_id: str | None,
+    *,
+    quoted_messages: Sequence[Message],
+    persona_handle: str,
+    author: HumanAuthor,
+    new_text: str,
+    name_of: NameResolver,
+) -> str:
+    """Assemble a persona's full prompt from raw transcript inputs.
+
+    This is the one deep seam the orchestrator crosses to turn messages into
+    prompt text. It slices the delta exactly **once** (via :func:`delta_messages`)
+    and uses that single slice both to render the attributed delta and to
+    de-duplicate quotes — a quoted message already present in the delta is not
+    rendered again as a blockquote. Doing the slice once here removes the old
+    two-slice hazard, where the orchestrator re-derived the slice for dedup and
+    the two could silently drift (M4).
+
+    ``quoted_messages`` are the already-fetched :class:`Message` objects for the
+    caller's quoted ids; resolving ids is I/O and stays in the caller, keeping
+    this function pure. A stale/foreign ``last_seen_id`` raises
+    :class:`TranscriptError` (no silent full-history fallback). Section order is
+    owned by :func:`app.services.prompt.assemble_prompt`.
+    """
+    delta = delta_messages(messages, last_seen_id)
+    seen_ids = {m.id for m in delta}
+    quotes_to_render = [m for m in quoted_messages if m.id not in seen_ids]
+    return assemble_prompt(
+        delta=render_delta(delta, persona_handle=persona_handle, name_of=name_of),
+        quotes=render_quotes(quotes_to_render, name_of),
+        author=author,
+        new_text=new_text,
+        persona_handle=persona_handle,
+    )

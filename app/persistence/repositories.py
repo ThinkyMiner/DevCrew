@@ -188,6 +188,7 @@ class RoomRepo:
             topic=row["topic"],
             default_reply_mode=ReplyMode(row["default_reply_mode"]),
             delegation_enabled=bool(row["delegation_enabled"]),
+            working_dir=row["working_dir"],
             archived=bool(row["archived"]),
             created_at=_parse_dt(row["created_at"]),
         )
@@ -195,13 +196,14 @@ class RoomRepo:
     def create(self, room: Room) -> Room:
         self._db.execute(
             "INSERT INTO room (id, name, topic, default_reply_mode, delegation_enabled, "
-            "archived, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "working_dir, archived, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 room.id,
                 room.name,
                 room.topic,
                 room.default_reply_mode.value,
                 int(room.delegation_enabled),
+                room.working_dir,
                 int(room.archived),
                 _dt(room.created_at),
             ),
@@ -219,12 +221,13 @@ class RoomRepo:
     def update(self, room: Room) -> Room:
         self._db.execute(
             "UPDATE room SET name = ?, topic = ?, default_reply_mode = ?, "
-            "delegation_enabled = ?, archived = ? WHERE id = ?",
+            "delegation_enabled = ?, working_dir = ?, archived = ? WHERE id = ?",
             (
                 room.name,
                 room.topic,
                 room.default_reply_mode.value,
                 int(room.delegation_enabled),
+                room.working_dir,
                 int(room.archived),
                 room.id,
             ),

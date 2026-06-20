@@ -51,9 +51,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
-from datetime import UTC, datetime
 
-from app.config.logging import run_id_var
 from app.domain.errors import HarnessError, SessionNotFound, TeamError, TranscriptError
 from app.domain.events import RunDone, RunError, StreamEvent, TextDelta, Usage
 from app.domain.models import (
@@ -63,7 +61,6 @@ from app.domain.models import (
     Persona,
     PersonaSession,
     ReplyMode,
-    RunRecord,
 )
 from app.harness.base import RunSpec
 from app.harness.registry import BackendRegistry
@@ -77,9 +74,9 @@ from app.persistence.repositories import (
 )
 from app.persistence.run_log import RunLogStore, RunLogWriter
 from app.services.mentions import find_mentions
-from app.services.prompt import assemble_prompt
 from app.services.routing import resolve_targets
-from app.services.transcript import build_delta, delta_messages, render_quotes
+from app.services.run_scope import run_scope
+from app.services.transcript import assemble_context
 
 # Delegation caps (the "Balanced" preset). A persona's reply may pull in teammates
 # by @handle; these bound the blast radius so one post can't fan out without limit.
@@ -272,26 +269,20 @@ class ChatOrchestrator:
                 f"{persona.provider.value!r} (supported: {sorted(backend.supported_commands)})"
             )
 
-        run = RunRecord(
+        with run_scope(
+            self._runs,
+            self._run_log,
             room_id=room_id,
             persona_id=persona_id,
             command_redacted=f"{persona.provider.value} control {command} resume=True",
-        )
-        run_id = run.run_id
-        token = run_id_var.set(run_id)
-        writer = self._run_log.open(room_id, persona_id, run_id)
-        run.log_path = str(writer.path)
-        self._runs.create(run)
-
-        captured_session_id: str | None = harness_session_id
-        last_usage: Usage | None = None
-        error_kind: str | None = None
-        try:
+        ) as (run, writer):
+            run_id = run.run_id
+            captured_session_id: str | None = harness_session_id
             try:
                 async for event in backend.send_command(harness_session_id, command):
                     writer.write_event(event)
                     if isinstance(event, Usage):
-                        last_usage = event
+                        run.usage = event.model_dump()
                     elif isinstance(event, RunDone):
                         captured_session_id = event.session_id
                         # Stamp the owning run_id onto the terminal event so a
@@ -299,7 +290,7 @@ class ChatOrchestrator:
                         event = event.model_copy(update={"run_id": run_id})
                     yield event
             except TeamError as exc:
-                error_kind = exc.kind
+                run.error_kind = exc.kind
                 err = RunError(
                     error_kind=exc.kind,
                     message=_redact(str(exc)),
@@ -310,9 +301,9 @@ class ChatOrchestrator:
                 yield err
                 return
             except Exception as exc:
-                error_kind = type(exc).__name__
+                run.error_kind = type(exc).__name__
                 err = RunError(
-                    error_kind=error_kind,
+                    error_kind=run.error_kind,
                     message=_redact(str(exc)),
                     run_id=run_id,
                     log_path=str(writer.path),
@@ -331,13 +322,6 @@ class ChatOrchestrator:
                     status="idle",
                 )
             )
-        finally:
-            run.exit_code = 0 if error_kind is None else 1
-            run.error_kind = error_kind
-            run.usage = last_usage.model_dump() if last_usage is not None else {}
-            run.finished_at = datetime.now(UTC)
-            self._runs.finalize(run)
-            run_id_var.reset(token)
 
     # ------------------------------------------------------------------ #
     # routing
@@ -623,23 +607,17 @@ class ChatOrchestrator:
         resume_session_id = session.harness_session_id if session else None
         last_seen = session.last_seen_message_id if session else None
 
-        run = RunRecord(
+        with run_scope(
+            self._runs,
+            self._run_log,
             room_id=room_id,
             persona_id=persona.id,
             command_redacted=self._redacted_command(persona, resume_session_id),
-        )
-        run_id = run.run_id
-        token = run_id_var.set(run_id)
-        writer = self._run_log.open(room_id, persona.id, run_id)
-        run.log_path = str(writer.path)
-        self._runs.create(run)
+        ) as (run, writer):
+            run_id = run.run_id
+            accumulated: list[str] = []
+            captured_session_id: str | None = resume_session_id
 
-        accumulated: list[str] = []
-        captured_session_id: str | None = resume_session_id
-        last_usage: Usage | None = None
-        error_kind: str | None = None
-
-        try:
             # Build the prompt. A stale pointer (TranscriptError) is a per-persona
             # failure, not a crash of the whole post.
             try:
@@ -647,7 +625,7 @@ class ChatOrchestrator:
                     messages, last_seen, persona, author, text, quoted_ids, name_of
                 )
             except TranscriptError as exc:
-                error_kind = exc.kind
+                run.error_kind = exc.kind
                 async for item in self._emit_error(
                     room_id, persona, run_id, writer, exc.kind, str(exc)
                 ):
@@ -655,7 +633,11 @@ class ChatOrchestrator:
                 return
 
             roster = self._roster_note(room_id, persona) if delegation_on else ""
-            spec = self._build_spec(persona, prompt, resume_session_id, roster)
+            # The room's shared working_dir (if set) wins over the persona's own, so
+            # the whole team operates in one directory; else fall back per-persona.
+            room = self._rooms.get(room_id)
+            working_dir = (room.working_dir if room else None) or persona.working_dir
+            spec = self._build_spec(persona, prompt, resume_session_id, roster, working_dir)
             backend = self._registry.get_backend(persona.provider)
 
             try:
@@ -664,7 +646,7 @@ class ChatOrchestrator:
                     if isinstance(event, TextDelta):
                         accumulated.append(event.text)
                     elif isinstance(event, Usage):
-                        last_usage = event
+                        run.usage = event.model_dump()
                     elif isinstance(event, RunDone):
                         if event.session_id is not None:
                             captured_session_id = event.session_id
@@ -673,7 +655,7 @@ class ChatOrchestrator:
                         event = event.model_copy(update={"run_id": run_id})
                     yield (persona.id, event)
             except TeamError as exc:
-                error_kind = exc.kind
+                run.error_kind = exc.kind
                 async for item in self._emit_error(
                     room_id, persona, run_id, writer, exc.kind, _redact(str(exc))
                 ):
@@ -682,14 +664,15 @@ class ChatOrchestrator:
             except Exception as exc:
                 # Uniform per-persona isolation (AGENTS §4): an untyped error is
                 # recorded exactly like a typed one — structured RunError event +
-                # placeholder Message + finalized RunRecord (error_kind set in the
-                # finally) — and then we RETURN, never re-raise. Re-raising here
-                # used to abort later siblings in SEQUENTIAL mode and was silently
-                # swallowed by gather() in PARALLEL: an asymmetry. A persona's
-                # failure must never propagate out of its own turn in either mode.
-                error_kind = type(exc).__name__
+                # placeholder Message + finalized RunRecord (error_kind set on the
+                # run, finalized by run_scope) — and then we RETURN, never
+                # re-raise. Re-raising here used to abort later siblings in
+                # SEQUENTIAL mode and was silently swallowed by gather() in
+                # PARALLEL: an asymmetry. A persona's failure must never propagate
+                # out of its own turn in either mode.
+                run.error_kind = type(exc).__name__
                 async for item in self._emit_error(
-                    room_id, persona, run_id, writer, error_kind, _redact(str(exc))
+                    room_id, persona, run_id, writer, run.error_kind, _redact(str(exc))
                 ):
                     yield item
                 return
@@ -714,13 +697,6 @@ class ChatOrchestrator:
                     status="idle",
                 )
             )
-        finally:
-            run.exit_code = 0 if error_kind is None else 1
-            run.error_kind = error_kind
-            run.usage = last_usage.model_dump() if last_usage is not None else {}
-            run.finished_at = datetime.now(UTC)
-            self._runs.finalize(run)
-            run_id_var.reset(token)
 
     # ------------------------------------------------------------------ #
     # helpers
@@ -736,29 +712,18 @@ class ChatOrchestrator:
         quoted_ids: list[str],
         name_of: _NameResolver,
     ) -> str:
-        delta = build_delta(
-            messages, last_seen, persona_handle=persona.handle, name_of=name_of.resolve
-        )
-        # Determine which message ids actually appear in the delta slice so we can
-        # de-dup quotes: a quoted message already shown in the delta should not be
-        # rendered again as a blockquote (the orchestrator owns this dedup, per
-        # render_quotes' docstring). Reuse transcript.delta_messages — the SAME
-        # slicing build_delta uses — so the two can never drift (M4).
-        delta_ids = {m.id for m in delta_messages(messages, last_seen)}
-        quoted_messages: list[Message] = []
-        for qid in quoted_ids:
-            if qid in delta_ids:
-                continue
-            m = self._messages.get(qid)
-            if m is not None:
-                quoted_messages.append(m)
-        quotes = render_quotes(quoted_messages, name_of.resolve)
-        return assemble_prompt(
-            delta=delta,
-            quotes=quotes,
+        # Resolve the quoted ids to Message objects (the only I/O here); slicing,
+        # quote-dedup, and assembly all happen once behind assemble_context, so
+        # the delta is sliced exactly once and the dedup can never drift from it.
+        quoted_messages = [m for qid in quoted_ids if (m := self._messages.get(qid)) is not None]
+        return assemble_context(
+            messages,
+            last_seen,
+            quoted_messages=quoted_messages,
+            persona_handle=persona.handle,
             author=author,
             new_text=text,
-            persona_handle=persona.handle,
+            name_of=name_of.resolve,
         )
 
     def _build_spec(
@@ -767,6 +732,7 @@ class ChatOrchestrator:
         prompt: str,
         resume_session_id: str | None,
         system_suffix: str = "",
+        working_dir: str | None = None,
     ) -> RunSpec:
         system_prompt = persona.system_prompt
         if system_suffix:
@@ -783,7 +749,7 @@ class ChatOrchestrator:
             resume_session_id=resume_session_id,
             mcp_servers=persona.mcp_servers,
             allowed_tools=persona.allowed_tools,
-            working_dir=persona.working_dir,
+            working_dir=working_dir if working_dir is not None else persona.working_dir,
             permission_mode=persona.permission_mode,
         )
 

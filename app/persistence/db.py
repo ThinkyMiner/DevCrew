@@ -61,6 +61,7 @@ class Database:
                 "delegation_enabled",
                 "ALTER TABLE room ADD COLUMN delegation_enabled INTEGER NOT NULL DEFAULT 1",
             ),
+            ("room", "working_dir", "ALTER TABLE room ADD COLUMN working_dir TEXT"),
         ]
         with self._lock:
             for table, column, ddl in additive:
