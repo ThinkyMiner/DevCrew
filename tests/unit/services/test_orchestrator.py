@@ -284,6 +284,37 @@ async def test_second_message_resumes_saved_session(orch, repos, room, me, perso
 
 
 @pytest.mark.asyncio
+async def test_room_working_dir_reaches_spec_and_overrides_persona(
+    orch, repos, room, me, persona_a, mock_a
+):
+    # The room's shared working_dir is what the persona's harness runs in; it wins
+    # over any per-persona working_dir (the shared-dir contract).
+    persona_a.working_dir = "/persona/only"
+    repos["persona"].update(persona_a)
+    room.working_dir = "/rooms/shared"
+    repos["room"].update(room)
+
+    await _drain(
+        orch.post_message(room.id, author=me, text="@alpha hi", reply_mode=ReplyMode.SEQUENTIAL)
+    )
+    assert mock_a.calls[-1].working_dir == "/rooms/shared"
+
+
+@pytest.mark.asyncio
+async def test_persona_working_dir_used_when_room_has_none(
+    orch, repos, room, me, persona_a, mock_a
+):
+    # With no room working_dir, the persona's own working_dir still applies.
+    persona_a.working_dir = "/persona/only"
+    repos["persona"].update(persona_a)
+
+    await _drain(
+        orch.post_message(room.id, author=me, text="@alpha hi", reply_mode=ReplyMode.SEQUENTIAL)
+    )
+    assert mock_a.calls[-1].working_dir == "/persona/only"
+
+
+@pytest.mark.asyncio
 async def test_sequential_b_sees_a_reply(
     orch, repos, room, me, persona_a, persona_b, mock_a, mock_b
 ):

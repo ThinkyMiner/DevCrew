@@ -104,6 +104,9 @@ class CodexHarness:
     # advertise NO supported commands conservatively; send_command will raise
     # HarnessError for any command until a live mechanism is confirmed.
     supported_commands: set[str] = set()
+    # Models the codex CLI's ``-m/--model`` accepts (suggestions, not an
+    # allowlist — a persona may type any id the installed codex build supports).
+    supported_models: tuple[str, ...] = ("gpt-5.5-codex", "gpt-5.5")
 
     def __init__(
         self,

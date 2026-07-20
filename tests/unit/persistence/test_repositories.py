@@ -86,6 +86,15 @@ def test_author_roundtrip_and_defaults(db: Database) -> None:
     assert got.weight_enabled is True  # type: ignore[union-attr]
 
 
+def test_persona_get_by_handle(db: Database) -> None:
+    repo = PersonaRepo(db)
+    p = Persona(name="Ada", handle="architect", provider=Provider.CLAUDE, model="opus")
+    repo.create(p)
+    got = repo.get_by_handle("architect")
+    assert got is not None and got.id == p.id
+    assert repo.get_by_handle("missing") is None
+
+
 # --- RoomRepo + membership ----------------------------------------------
 
 
@@ -104,6 +113,51 @@ def test_room_delegation_enabled_roundtrips(db: Database) -> None:
     r.delegation_enabled = True
     repo.update(r)
     assert repo.get(r.id).delegation_enabled is True  # type: ignore[union-attr]
+
+
+def test_room_working_dir_roundtrips(db: Database) -> None:
+    repo = RoomRepo(db)
+    r = Room(name="Repo", working_dir="/Users/me/project")
+    repo.create(r)
+    assert repo.get(r.id).working_dir == "/Users/me/project"  # type: ignore[union-attr]
+    r.working_dir = None
+    repo.update(r)
+    assert repo.get(r.id).working_dir is None  # type: ignore[union-attr]
+
+
+def test_room_list_by_activity_orders_by_last_message_then_creation(db: Database) -> None:
+    from datetime import UTC, datetime
+
+    def dt(year: int) -> datetime:
+        return datetime(year, 1, 1, tzinfo=UTC)
+
+    rooms, msgs = RoomRepo(db), MessageRepo(db)
+    a = rooms.create(Room(name="A", created_at=dt(2020)))
+    rooms.create(Room(name="B", created_at=dt(2021)))  # no messages -> uses creation time
+    c = rooms.create(Room(name="C", created_at=dt(2019)))
+    msgs.create(
+        Message(
+            room_id=a.id,
+            author_kind=AuthorKind.HUMAN,
+            author_ref="me",
+            content="newest",
+            created_at=dt(2026),
+        )
+    )
+    msgs.create(
+        Message(
+            room_id=c.id,
+            author_kind=AuthorKind.HUMAN,
+            author_ref="me",
+            content="older",
+            created_at=dt(2022),
+        )
+    )
+    # Activity = last message time, falling back to room creation time:
+    #   A -> 2026 (msg), C -> 2022 (msg), B -> 2021 (creation). Most recent first.
+    assert [r.name for r in rooms.list_by_activity()] == ["A", "C", "B"]
+    # list() is unchanged: still stable creation order.
+    assert [r.name for r in rooms.list()] == ["C", "A", "B"]
 
 
 def test_room_membership_preserves_order(db: Database) -> None:

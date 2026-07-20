@@ -43,6 +43,7 @@ def test_protocol_is_runtime_checkable() -> None:
     class Dummy:
         name = "dummy"
         supported_commands: set[str] = set()
+        supported_models: tuple[str, ...] = ()
 
         async def run(self, spec: RunSpec) -> AsyncIterator[StreamEvent]:
             if False:  # pragma: no cover

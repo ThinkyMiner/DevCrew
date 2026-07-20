@@ -18,6 +18,42 @@ Vision & success criteria: [`../goal.md`](../goal.md). Requirements:
 Why-it's-shaped-this-way: [`DECISIONS.md`](DECISIONS.md). Engineering bar:
 [`../AGENTS.md`](../AGENTS.md). Running it: [`../README.md`](../README.md).
 
+## 1b. 2026-07-20 — team, orchestrator, dynamic models, sidebar order
+
+Four operator-requested changes landed (all test-first, gates green):
+
+- **`@systemd` orchestrator.** A seeded persona that routes work: tag it with a
+  goal and it decomposes the task and @-mentions the right teammates with a crisp
+  problem statement each; the existing delegation loop turns those mentions into
+  real teammate turns. **Auto-added to every new room** (`RoomService.create`).
+- **Named team + code seed.** The default team now has human first-names (Ada,
+  Ken, Linus, …) with the role kept in `job`, defined in
+  `app/services/persona_seed.py` and seeded at startup (idempotent, by handle).
+  Seeded as normal, addable personas (not templates) — templates were being
+  filtered out of the room "add member" picker, which is what pushed operators to
+  duplicate them.
+- **Dynamic model list.** Models are now backend-owned (`supported_models` on each
+  harness, incl. `fable`) and served at `GET /models`; the persona editor fetches
+  it instead of a hardcoded JS list. Free-typing still works.
+- **Sidebar order.** `GET /rooms` returns rooms most-recently-active first
+  (`RoomRepo.list_by_activity`); the active room floats to the top on
+  `turn_complete`.
+
+**One-time cleanup of an EXISTING `data/team.db`** (dedupe the old `-copy`
+personas, merge the two in-use ones, human-name rename, ensure `@systemd`):
+
+```bash
+# STOP the running app first (it must not write while this runs).
+python -m scripts.migrate_personas --dry-run     # preview counts, writes nothing
+python -m scripts.migrate_personas               # backs up team.db, then migrates
+```
+
+It backs up `team.db` (+ WAL/SHM) with a timestamp before touching anything and is
+idempotent. On the current DB it removes 15 unused copies, merges 2 (re-pointing
+their messages/membership/sessions to the originals — 0 orphaned), renames 13, and
+seeds `@systemd`, leaving 14 personas. Startup seeding (`ensure_default_personas`)
+covers fresh installs; the script covers the pre-existing DB.
+
 ## 2. Current state
 
 - **Status:** feature-complete against the PRD and the 7 success criteria; merged

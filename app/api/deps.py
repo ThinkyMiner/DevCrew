@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from fastapi import Request
 
 from app.config.settings import Settings
+from app.harness.registry import BackendRegistry
 from app.persistence.repositories import MessageRepo, RunRepo
 from app.persistence.run_log import RunLogStore
 from app.services.authors import AuthorService
@@ -67,3 +68,8 @@ def get_run_repo(request: Request) -> RunRepo:
 def get_session_store(request: Request) -> SessionStore:
     store: SessionStore = request.app.state.session_store
     return store
+
+
+def get_registry(request: Request) -> BackendRegistry:
+    registry: BackendRegistry = request.app.state.registry
+    return registry

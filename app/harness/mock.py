@@ -29,6 +29,7 @@ class MockHarness:
 
     name = "mock"
     supported_commands: set[str] = {"/compact", "/clear"}
+    supported_models: tuple[str, ...] = ("mock",)
 
     def __init__(self, script: dict[str, list[StreamEvent]] | None = None) -> None:
         self._script: dict[str, list[StreamEvent]] = dict(script or {})

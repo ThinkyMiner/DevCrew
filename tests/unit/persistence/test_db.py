@@ -80,6 +80,28 @@ def test_init_schema_migrates_legacy_room_adding_delegation(tmp_path: Path) -> N
     )
 
 
+def test_init_schema_migrates_legacy_room_adding_working_dir(tmp_path: Path) -> None:
+    # Pre-`working_dir` room table (already has delegation_enabled): init_schema()
+    # must add working_dir as a nullable column and leave existing rows intact.
+    db = Database(tmp_path / "t.db")
+    db.execute(
+        "CREATE TABLE room (id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+        "topic TEXT NOT NULL DEFAULT '', default_reply_mode TEXT NOT NULL, "
+        "delegation_enabled INTEGER NOT NULL DEFAULT 1, "
+        "archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"
+    )
+    db.execute(
+        "INSERT INTO room (id, name, default_reply_mode, created_at) "
+        "VALUES ('r1','Old','sequential','2026-01-01T00:00:00+00:00')"
+    )
+    assert "working_dir" not in {r["name"] for r in db.query("PRAGMA table_info(room)")}
+
+    db.init_schema()
+
+    assert "working_dir" in {r["name"] for r in db.query("PRAGMA table_info(room)")}
+    assert db.query("SELECT working_dir FROM room WHERE id = 'r1'")[0]["working_dir"] is None
+
+
 def test_foreign_keys_enabled(tmp_path: Path) -> None:
     db = Database(tmp_path / "t.db")
     db.init_schema()

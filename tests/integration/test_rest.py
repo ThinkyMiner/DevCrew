@@ -116,6 +116,31 @@ def test_author_crud(client):
     assert client.get(f"/authors/{aid}").status_code == 404
 
 
+# -- seeded team + orchestrator (end-to-end through the real app) ------------
+
+
+def test_seeded_team_and_room_auto_adds_dispatcher(test_settings, registry, monkeypatch):
+    """With default seeding on, the app ships the named team + @systemd, and a
+    freshly created room auto-includes the orchestrator (zero-setup routing)."""
+    monkeypatch.setattr(health_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
+    from fastapi.testclient import TestClient
+
+    app = create_app(test_settings, registry=registry, seed_personas=True)
+    seeded = TestClient(app)
+
+    personas = seeded.get("/personas").json()
+    handles = {p["handle"] for p in personas}
+    assert "systemd" in handles  # the orchestrator
+    assert "architect" in handles
+    # human names, not role-labels, in `name`
+    ada = next(p for p in personas if p["handle"] == "architect")
+    assert ada["name"] == "Ada"
+
+    rid = seeded.post("/rooms", json={"name": "Fresh"}).json()["id"]
+    members = seeded.get(f"/rooms/{rid}/members").json()
+    assert "systemd" in {m["handle"] for m in members}
+
+
 # -- rooms -------------------------------------------------------------------
 
 
@@ -139,6 +164,35 @@ def test_room_crud_and_patch(client):
     assert body["archived"] is True
     assert client.delete(f"/rooms/{rid}").status_code == 204
     assert client.get(f"/rooms/{rid}").status_code == 404
+
+
+def test_room_working_dir_create_and_patch(client, tmp_path):
+    room = client.post("/rooms", json={"name": "Repo", "working_dir": str(tmp_path)}).json()
+    assert room["working_dir"] == str(tmp_path)
+    rid = room["id"]
+    # clear it back to None
+    patched = client.patch(f"/rooms/{rid}", json={"working_dir": None})
+    assert patched.status_code == 200
+    assert patched.json()["working_dir"] is None
+
+
+def test_fs_dirs_lists_subdirectories(client, tmp_path):
+    base = tmp_path / "proj"  # own folder so the test's data dir can't leak in
+    base.mkdir()
+    (base / "src").mkdir()
+    (base / "docs").mkdir()
+    (base / "readme.md").write_text("x")
+    resp = client.get("/fs/dirs", params={"path": str(base)})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["path"] == str(base)
+    assert [e["name"] for e in body["entries"]] == ["docs", "src"]
+    assert body["parent"] == str(tmp_path)
+
+
+def test_fs_dirs_missing_path_404(client, tmp_path):
+    resp = client.get("/fs/dirs", params={"path": str(tmp_path / "nope")})
+    assert resp.status_code == 404
 
 
 def test_room_membership(client):
@@ -295,3 +349,17 @@ def test_lifespan_closes_db_and_seeds_within_context(test_settings, registry, mo
 
     with pytest.raises(sqlite3.ProgrammingError):
         app.state.db.query("SELECT 1")
+
+
+# -- models (dynamic, backend-owned) ----------------------------------------
+
+
+def test_list_models_returns_provider_map(client):
+    resp = client.get("/models")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body, dict)
+    # The test registry wires the mock under the claude/codex providers too, so
+    # those keys are present and each maps to a non-empty list of model names.
+    assert "claude" in body
+    assert isinstance(body["claude"], list) and body["claude"]

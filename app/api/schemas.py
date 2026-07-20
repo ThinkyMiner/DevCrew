@@ -65,6 +65,7 @@ class RoomCreate(BaseModel):
     topic: str = ""
     default_reply_mode: ReplyMode = ReplyMode.SEQUENTIAL
     delegation_enabled: bool = True
+    working_dir: str | None = None
 
 
 class RoomUpdate(BaseModel):
@@ -72,6 +73,7 @@ class RoomUpdate(BaseModel):
     topic: str | None = None
     default_reply_mode: ReplyMode | None = None
     delegation_enabled: bool | None = None
+    working_dir: str | None = None
     archived: bool | None = None
 
 

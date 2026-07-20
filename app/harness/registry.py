@@ -44,6 +44,16 @@ class BackendRegistry:
                 f"no backend registered for provider {provider.value!r}"
             ) from exc
 
+    def list_models(self) -> dict[str, list[str]]:
+        """Provider value -> its backend's ``supported_models``, for every wired
+        backend. This is the single source for the persona editor's model picker:
+        the list follows whatever adapters are actually registered, so it can
+        never drift from what the backends really accept."""
+        return {
+            provider.value: list(backend.supported_models)
+            for provider, backend in self._backends.items()
+        }
+
 
 def build_default_registry(scratch_dir: str | None = None) -> BackendRegistry:
     """Build a fresh registry wired with the real CLI adapters.

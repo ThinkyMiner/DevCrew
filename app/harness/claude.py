@@ -90,11 +90,18 @@ _AUTH_PATTERNS = (
     "401",
 )
 
+
 class ClaudeHarness:
     """:class:`AgentBackend` for the Claude Code CLI."""
 
     name = "claude"
     supported_commands: set[str] = {"/compact", "/clear"}
+    # Model aliases the claude CLI's ``--model`` accepts (most-capable first). The
+    # CLI resolves an alias to the latest model of that family, so we keep aliases
+    # (not pinned ids) and let it stay current. ``fable`` is a current alias
+    # (``claude-fable-5``); a persona may still type a full id — the field is a
+    # suggestion, not an allowlist (see _normalize_model).
+    supported_models: tuple[str, ...] = ("opus", "sonnet", "haiku", "fable")
 
     def __init__(
         self,

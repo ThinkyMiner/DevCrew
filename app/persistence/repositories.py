@@ -90,6 +90,12 @@ class PersonaRepo:
         rows = self._db.query("SELECT * FROM persona WHERE id = ?", (persona_id,))
         return self._row_to_model(rows[0]) if rows else None
 
+    def get_by_handle(self, handle: str) -> Persona | None:
+        """Look up a persona by its unique handle (or ``None``). Used to resolve
+        the seeded orchestrator so a new room can auto-add it."""
+        rows = self._db.query("SELECT * FROM persona WHERE handle = ?", (handle,))
+        return self._row_to_model(rows[0]) if rows else None
+
     def list(self) -> list[Persona]:
         rows = self._db.query("SELECT * FROM persona ORDER BY created_at, id")
         return [self._row_to_model(r) for r in rows]
@@ -216,6 +222,23 @@ class RoomRepo:
 
     def list(self) -> list[Room]:
         rows = self._db.query("SELECT * FROM room ORDER BY created_at, id")
+        return [self._row_to_model(r) for r in rows]
+
+    def list_by_activity(self) -> builtins.list[Room]:
+        """Rooms ordered most-recently-active first — the sidebar order.
+
+        Activity is the timestamp of a room's latest message, falling back to the
+        room's own creation time when it has none (a freshly created, empty room
+        is recent activity and belongs at the top). This is a read-only ordering
+        variant of :meth:`list`; ``list`` itself stays stable creation-order for
+        callers that rely on it.
+        """
+        rows = self._db.query(
+            "SELECT room.* FROM room "
+            "LEFT JOIN (SELECT room_id, MAX(created_at) AS last_at "
+            "           FROM message GROUP BY room_id) m ON m.room_id = room.id "
+            "ORDER BY COALESCE(m.last_at, room.created_at) DESC, room.created_at DESC, room.id"
+        )
         return [self._row_to_model(r) for r in rows]
 
     def update(self, room: Room) -> Room:

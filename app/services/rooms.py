@@ -20,6 +20,7 @@ import builtins
 from app.domain.errors import NotFound
 from app.domain.models import Persona, Room
 from app.persistence.repositories import PersonaRepo, RoomRepo
+from app.services.persona_seed import DISPATCHER_HANDLE
 
 
 class RoomService:
@@ -30,7 +31,18 @@ class RoomService:
     # -- CRUD -----------------------------------------------------------------
 
     def create(self, room: Room) -> Room:
-        return self._rooms.create(room)
+        """Create a room and auto-add the orchestrator (``@systemd``) as a member.
+
+        Every new conversation ships with the dispatcher already present so the
+        operator can tag it to route work with zero setup. If the dispatcher
+        persona hasn't been seeded (e.g. a bare test DB), this is a graceful
+        no-op — the room is simply created empty.
+        """
+        created = self._rooms.create(room)
+        dispatcher = self._personas.get_by_handle(DISPATCHER_HANDLE)
+        if dispatcher is not None:
+            self._rooms.add_member(created.id, dispatcher.id)
+        return created
 
     def get(self, room_id: str) -> Room:
         room = self._rooms.get(room_id)
@@ -40,6 +52,11 @@ class RoomService:
 
     def list(self) -> builtins.list[Room]:
         return self._rooms.list()
+
+    def list_recent(self) -> builtins.list[Room]:
+        """Rooms ordered most-recently-active first — for the sidebar (the latest
+        conversation floats to the top, like a messenger)."""
+        return self._rooms.list_by_activity()
 
     def update(self, room: Room) -> Room:
         """Persist edits to an existing room row (name/topic/reply-mode/archived).

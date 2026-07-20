@@ -90,3 +90,23 @@ def test_build_default_registry_defaults_to_no_scratch() -> None:
     claude = reg.get_backend(Provider.CLAUDE)
     assert isinstance(claude, ClaudeHarness)
     assert claude._scratch_dir is None
+
+
+def test_backends_declare_supported_models() -> None:
+    # The model list is backend-owned (like supported_commands): each adapter is
+    # the single source of truth for the models its provider accepts. `fable` is
+    # a valid claude alias as of the current CLI, so it must be offered.
+    assert "fable" in ClaudeHarness().supported_models
+    assert "opus" in ClaudeHarness().supported_models
+    assert CodexHarness().supported_models  # non-empty
+    assert MockHarness().supported_models == ("mock",)
+
+
+def test_list_models_exposes_registered_backend_models() -> None:
+    # The registry enumerates provider -> models for whatever backends are wired,
+    # so the frontend's model picker is dynamic (no hardcoded, drifting list).
+    reg = build_default_registry()
+    models = reg.list_models()
+    assert "claude" in models and "codex" in models
+    assert "fable" in models["claude"]
+    assert all(isinstance(v, list) and v for v in models.values())

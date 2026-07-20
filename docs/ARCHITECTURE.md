@@ -132,16 +132,31 @@ files — they carry the load.
   mention regex mirrors the backend handle grammar (and the JS `mentions.js`).
 - `personas.py` / `rooms.py` / `authors.py` / `session_store.py` — CRUD facades
   that add value over the repos (duplicate, templates, `ensure_defaults()` seeding
-  Me+Boss, `reset_session`, in-flight tracking).
+  Me+Boss, `reset_session`, in-flight tracking). `rooms.create` also auto-adds the
+  `@systemd` orchestrator as a member (zero-setup routing); `rooms.list_recent`
+  orders rooms most-recently-active first (the sidebar order).
+- `persona_seed.py` — the canonical **default team**: `DEFAULT_PERSONAS` (human
+  first-names + role `job`s + layered prompts) and the `@systemd` **orchestrator**
+  (tag it with a goal; it decomposes the work and @-mentions the right teammates,
+  which the existing delegation loop turns into real teammate turns — no new agent
+  loop). `ensure_default_personas(repo)` seeds any missing handle at startup
+  (idempotent). One-off cleanup of a pre-existing DB (dedupe the old `-copy`
+  personas, human-name rename, ensure `@systemd`) lives in
+  `scripts/migrate_personas.py`.
 
 ### api/ — thin transport (~430 lines)
 - `app_factory.py` — **the composition root**: configures logging, ensures dirs +
   the neutral persona scratch dir, opens the db, builds repos/services/orchestrator,
   builds the registry (real adapters unless one is injected), seeds default
-  authors, mounts routers + `/static` + `GET /`, registers the WS endpoint and the
-  centralized `TeamError`→HTTP handler, and closes the db on lifespan shutdown.
+  authors + the default persona team (`seed_personas=True`, off in tests that
+  build their own personas), mounts routers + `/static` + `GET /`, registers the
+  WS endpoint and the centralized `TeamError`→HTTP handler, and closes the db on
+  lifespan shutdown.
 - `routes_*.py` — REST CRUD for personas/authors/rooms(+members)/messages, plus
-  `GET /runs/{run_id}/log` (path-traversal-guarded) and a persona session reset.
+  `GET /runs/{run_id}/log` (path-traversal-guarded), a persona session reset, and
+  `GET /models` — the dynamic, backend-owned model catalog (`{provider:[model]}`
+  from each harness's `supported_models`) that feeds the editor's model picker, so
+  the list follows the real adapters (e.g. `fable`) instead of a hardcoded one.
 - `ws.py` — `/ws/rooms/{room_id}`: drives the orchestrator on the event loop and
   streams frames (see §5). `deps.py` provides services from `app.state`;
   `schemas.py` are the write bodies; `health.py` is the PATH-presence check.

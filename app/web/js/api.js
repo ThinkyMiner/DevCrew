@@ -67,6 +67,9 @@ export const api = {
   duplicatePersona: (id) => post(`/personas/${id}/duplicate`),
   personaFromTemplate: (id) => post(`/personas/${id}/from-template`),
 
+  // dynamic, backend-owned model catalog ({provider: [model, ...]}) — see /models
+  listModels: () => get("/models"),
+
   // rooms (FR-R*)
   listRooms: () => get("/rooms"),
   getRoom: (id) => get(`/rooms/${id}`),
@@ -89,4 +92,7 @@ export const api = {
     post(`/rooms/${roomId}/personas/${personaId}/reset-session`),
 
   runLogUrl: (runId) => `/runs/${runId}/log`,
+
+  // folder picker for a room's shared working_dir (read-only dir listing)
+  listDirs: (path) => get(`/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ""}`),
 };

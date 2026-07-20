@@ -37,5 +37,8 @@ def client(test_settings, registry, monkeypatch) -> TestClient:
     # Health route resolves CLIs via shutil.which — fake them present so tests
     # never depend on a real claude/codex install.
     monkeypatch.setattr(health_mod.shutil, "which", lambda name: f"/usr/bin/{name}")
-    app = create_app(test_settings, registry=registry)
+    # seed_personas=False: these tests build their own personas, so the seeded
+    # team would collide on handles and add noise to membership/routing asserts.
+    # The seeded path is covered explicitly in test_rest.py::test_seeded_team_*.
+    app = create_app(test_settings, registry=registry, seed_personas=False)
     return TestClient(app)
