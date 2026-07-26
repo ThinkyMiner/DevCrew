@@ -291,10 +291,19 @@ async def test_real_subprocess_timeout_kills_child() -> None:
 
 async def test_real_subprocess_big_valid_json_line_parses() -> None:
     # A single valid line well over the default 64 KiB limit must parse, proving
-    # we raised the StreamReader limit.
+    # we raised the StreamReader limit. The child GENERATES the big line itself
+    # rather than us embedding the payload in the `-c` argument: Linux caps a
+    # single argv element at 128 KiB (MAX_ARG_STRLEN), so a literal 200 KB
+    # payload spawns fine on macOS but dies with "Argument list too long"
+    # (Errno 7) on the Linux CI runner. Keeping the argv tiny makes it portable.
     big_text = "y" * 200000
-    line = json.dumps({"type": "text", "text": big_text, "session_id": "sess-big"})
-    child = f"import sys\nsys.stdout.write({line!r} + '\\n')\nsys.exit(0)\n"
+    child = (
+        "import sys, json\n"
+        "big = 'y' * 200000\n"
+        "sys.stdout.write("
+        "json.dumps({'type': 'text', 'text': big, 'session_id': 'sess-big'}) + '\\n')\n"
+        "sys.exit(0)\n"
+    )
     events = await asyncio.wait_for(_collect(_run_real(_child_spawn(child))), timeout=5.0)
     text_events = [e for e in events if isinstance(e, TextDelta)]
     assert len(text_events) == 1
