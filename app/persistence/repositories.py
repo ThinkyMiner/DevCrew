@@ -90,6 +90,12 @@ class PersonaRepo:
         rows = self._db.query("SELECT * FROM persona WHERE id = ?", (persona_id,))
         return self._row_to_model(rows[0]) if rows else None
 
+    def get_by_handle(self, handle: str) -> Persona | None:
+        """Look up a persona by its unique handle (or ``None``). Used to resolve
+        the seeded orchestrator so a new room can auto-add it."""
+        rows = self._db.query("SELECT * FROM persona WHERE handle = ?", (handle,))
+        return self._row_to_model(rows[0]) if rows else None
+
     def list(self) -> list[Persona]:
         rows = self._db.query("SELECT * FROM persona ORDER BY created_at, id")
         return [self._row_to_model(r) for r in rows]
@@ -188,6 +194,7 @@ class RoomRepo:
             topic=row["topic"],
             default_reply_mode=ReplyMode(row["default_reply_mode"]),
             delegation_enabled=bool(row["delegation_enabled"]),
+            working_dir=row["working_dir"],
             archived=bool(row["archived"]),
             created_at=_parse_dt(row["created_at"]),
         )
@@ -195,13 +202,14 @@ class RoomRepo:
     def create(self, room: Room) -> Room:
         self._db.execute(
             "INSERT INTO room (id, name, topic, default_reply_mode, delegation_enabled, "
-            "archived, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "working_dir, archived, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 room.id,
                 room.name,
                 room.topic,
                 room.default_reply_mode.value,
                 int(room.delegation_enabled),
+                room.working_dir,
                 int(room.archived),
                 _dt(room.created_at),
             ),
@@ -216,15 +224,33 @@ class RoomRepo:
         rows = self._db.query("SELECT * FROM room ORDER BY created_at, id")
         return [self._row_to_model(r) for r in rows]
 
+    def list_by_activity(self) -> builtins.list[Room]:
+        """Rooms ordered most-recently-active first — the sidebar order.
+
+        Activity is the timestamp of a room's latest message, falling back to the
+        room's own creation time when it has none (a freshly created, empty room
+        is recent activity and belongs at the top). This is a read-only ordering
+        variant of :meth:`list`; ``list`` itself stays stable creation-order for
+        callers that rely on it.
+        """
+        rows = self._db.query(
+            "SELECT room.* FROM room "
+            "LEFT JOIN (SELECT room_id, MAX(created_at) AS last_at "
+            "           FROM message GROUP BY room_id) m ON m.room_id = room.id "
+            "ORDER BY COALESCE(m.last_at, room.created_at) DESC, room.created_at DESC, room.id"
+        )
+        return [self._row_to_model(r) for r in rows]
+
     def update(self, room: Room) -> Room:
         self._db.execute(
             "UPDATE room SET name = ?, topic = ?, default_reply_mode = ?, "
-            "delegation_enabled = ?, archived = ? WHERE id = ?",
+            "delegation_enabled = ?, working_dir = ?, archived = ? WHERE id = ?",
             (
                 room.name,
                 room.topic,
                 room.default_reply_mode.value,
                 int(room.delegation_enabled),
+                room.working_dir,
                 int(room.archived),
                 room.id,
             ),
@@ -423,3 +449,11 @@ class RunRepo:
     def get(self, run_id: str) -> RunRecord | None:
         rows = self._db.query("SELECT * FROM run_record WHERE run_id = ?", (run_id,))
         return self._row_to_model(rows[0]) if rows else None
+
+    def list_for_room(self, room_id: str) -> list[RunRecord]:
+        """Every run recorded in ``room_id``, in start order (evals/audit)."""
+        rows = self._db.query(
+            "SELECT * FROM run_record WHERE room_id = ? ORDER BY started_at, run_id",
+            (room_id,),
+        )
+        return [self._row_to_model(r) for r in rows]

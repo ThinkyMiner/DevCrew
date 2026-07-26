@@ -4,7 +4,9 @@
 // node and reusable. The editor turns `model`, `effort`, `allowed_tools`, and
 // `mcp_servers` into pickers; the option lists come from three places, merged by
 // the pure helpers below:
-//   1. a curated base list (what's commonly valid),
+//   1. the live per-provider model list fetched from GET /models (backend-owned,
+//      so it follows the real CLI adapters — e.g. a new `fable` alias appears
+//      automatically); MODEL_SUGGESTIONS below is only an offline fallback,
 //   2. values already in use across the operator's personas (so their own setup
 //      shows up without re-typing),
 //   3. whatever the persona being edited already has selected (never lose it).
@@ -15,11 +17,13 @@
 // `max` is claude-only; codex rejects it fail-loud, which is acceptable.
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
-// Curated, provider-aware model suggestions. Not exhaustive and not a hard limit
-// — the field accepts free text — just the common, known-good starting points.
+// OFFLINE FALLBACK ONLY. The real source of truth is GET /models (backend-owned
+// via each harness's `supported_models`); this list is used solely when that
+// fetch is unavailable or omits a provider, so the editor still offers sane
+// options. Kept in sync in spirit with the harness adapters (incl. `fable`).
 export const MODEL_SUGGESTIONS = {
-  claude: ["opus", "sonnet", "haiku"],
-  codex: ["gpt-5.5", "gpt-5.5-codex"],
+  claude: ["opus", "sonnet", "haiku", "fable"],
+  codex: ["gpt-5.5-codex", "gpt-5.5"],
   mock: ["mock"],
 };
 
@@ -57,11 +61,19 @@ function dedupe(values) {
 }
 
 /**
- * Model suggestions for a provider: the curated base list followed by any models
- * already used by personas on that same provider (deduped, base order kept).
+ * Model suggestions for a provider: the live per-provider list from the server
+ * (GET /models) followed by any models already used by personas on that same
+ * provider (deduped, server order kept). When the server map has no entry for
+ * the provider (fetch failed, or provider not wired), falls back to the built-in
+ * MODEL_SUGGESTIONS so the picker is never empty.
+ *
+ * @param provider          e.g. "claude"
+ * @param modelsByProvider  { claude: [...], codex: [...] } from GET /models
+ * @param personas          all personas, to surface models already in use
  */
-export function modelSuggestionsFor(provider, personas = []) {
-  const base = MODEL_SUGGESTIONS[provider] || [];
+export function modelSuggestionsFor(provider, modelsByProvider = {}, personas = []) {
+  const fromServer = modelsByProvider && modelsByProvider[provider];
+  const base = fromServer && fromServer.length ? fromServer : MODEL_SUGGESTIONS[provider] || [];
   const used = personas.filter((p) => p && p.provider === provider).map((p) => p.model);
   return dedupe([...base, ...used]);
 }

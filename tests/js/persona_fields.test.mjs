@@ -22,27 +22,38 @@ test("effort levels cover the CLI-valid set", () => {
   }
 });
 
-test("base model suggestions exist per provider", () => {
+test("built-in fallback model suggestions exist per provider (incl. fable for claude)", () => {
   for (const provider of ["claude", "codex", "mock"]) {
     assert.ok(Array.isArray(MODEL_SUGGESTIONS[provider]) && MODEL_SUGGESTIONS[provider].length);
   }
+  // fable is a current claude alias — the offline fallback must not omit it.
+  assert.ok(MODEL_SUGGESTIONS.claude.includes("fable"));
 });
 
-test("modelSuggestionsFor unions base list with models already used by that provider", () => {
+test("modelSuggestionsFor uses the dynamic per-provider list from the server", () => {
+  const modelsByProvider = {
+    claude: ["opus", "sonnet", "haiku", "fable"],
+    codex: ["gpt-5.5"],
+  };
   const personas = [
-    { provider: "claude", model: "opus 4.8" }, // custom-ish, not in base
-    { provider: "claude", model: "sonnet" }, // already in base → no dup
+    { provider: "claude", model: "opus 4.8" }, // custom-ish, not in the server list
+    { provider: "claude", model: "sonnet" }, // already listed → no dup
     { provider: "codex", model: "gpt-9-future" }, // different provider → excluded
   ];
-  const got = modelSuggestionsFor("claude", personas);
-  // base claude suggestions come first, in order
-  assert.deepEqual(got.slice(0, MODEL_SUGGESTIONS.claude.length), MODEL_SUGGESTIONS.claude);
+  const got = modelSuggestionsFor("claude", modelsByProvider, personas);
+  // the server's claude list comes first, in order
+  assert.deepEqual(got.slice(0, 4), ["opus", "sonnet", "haiku", "fable"]);
   // the custom claude model is appended
   assert.ok(got.includes("opus 4.8"));
   // no duplicates
   assert.equal(new Set(got).size, got.length);
   // other-provider models are not pulled in
   assert.ok(!got.includes("gpt-9-future"));
+});
+
+test("modelSuggestionsFor falls back to built-ins when the server map lacks the provider", () => {
+  const got = modelSuggestionsFor("claude", {}, []);
+  assert.deepEqual(got, MODEL_SUGGESTIONS.claude);
 });
 
 test("mcpSuggestionsFrom unions all personas' mcp servers, deduped", () => {

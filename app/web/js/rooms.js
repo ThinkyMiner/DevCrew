@@ -12,6 +12,76 @@ import { toast } from "./errors.js";
 
 const MODES = ["sequential", "parallel"];
 
+// A text input + inline folder browser for a room's shared working_dir. The
+// modal shell is single-instance, so the picker expands *inside* the current
+// modal (a separate modal would destroy the form). Returns { wrap, getValue }.
+function workingDirField(initialValue) {
+  const input = el("input", {
+    value: initialValue || "",
+    placeholder: "shared folder all personas work in (optional)",
+  });
+  const panel = el("div", { class: "dir-picker hidden" });
+  let cwd = null;
+  let open = false;
+
+  const navigate = async (path) => {
+    try {
+      render(await api.listDirs(path));
+    } catch (e) {
+      toast(e.kind, e.message);
+    }
+  };
+
+  const row = (ico, label, onClick) =>
+    el("div", { class: "dir-row", role: "button", tabindex: "0", onClick }, [
+      el("span", { class: "dir-ico", text: ico }),
+      el("span", { class: "grow", text: label }),
+    ]);
+
+  function render(listing) {
+    cwd = listing.path;
+    clear(panel);
+    panel.append(el("div", { class: "dir-cwd", text: listing.path }));
+    const list = el("div", { class: "dir-list" });
+    if (listing.parent) list.append(row("↩", ".. (parent)", () => navigate(listing.parent)));
+    for (const e of listing.entries) list.append(row("📁", e.name, () => navigate(e.path)));
+    if (!listing.entries.length) list.append(el("div", { class: "hint", text: "No sub-folders here." }));
+    panel.append(list);
+    panel.append(
+      el("div", { class: "dir-actions" }, [
+        el("button", {
+          class: "btn tiny primary",
+          type: "button",
+          text: "Use this folder",
+          onClick: () => {
+            input.value = cwd;
+            toggle(false);
+          },
+        }),
+      ])
+    );
+  }
+
+  function toggle(next) {
+    open = next === undefined ? !open : next;
+    panel.classList.toggle("hidden", !open);
+    if (open && cwd === null) navigate(input.value.trim() || null);
+  }
+
+  const browse = el("button", {
+    class: "btn tiny",
+    type: "button",
+    text: "Browse…",
+    onClick: () => toggle(),
+  });
+
+  const wrap = el("div", { class: "dir-field" }, [
+    el("div", { class: "dir-input-row" }, [input, browse]),
+    panel,
+  ]);
+  return { wrap, getValue: () => input.value.trim() || null };
+}
+
 export function renderRoomList(container, rooms, activeId, { onSelect, onSettings }) {
   clear(container);
   for (const r of rooms) {
@@ -53,6 +123,7 @@ export async function createRoom(onCreated) {
   const topic = el("input", { placeholder: "topic (optional)" });
   const mode = el("select");
   for (const m of MODES) mode.append(el("option", { value: m, text: m }));
+  const workdir = workingDirField("");
 
   openModal({
     title: "New room",
@@ -60,6 +131,11 @@ export async function createRoom(onCreated) {
       field("Name", name).field,
       field("Topic", topic).field,
       field("Default reply mode", mode).field,
+      field(
+        "Working directory",
+        workdir.wrap,
+        "Shared folder this room's personas read/edit. Chat history is not stored here."
+      ).field,
     ],
     footer: [
       el("button", {
@@ -72,6 +148,7 @@ export async function createRoom(onCreated) {
               name: name.value.trim(),
               topic: topic.value.trim(),
               default_reply_mode: mode.value,
+              working_dir: workdir.getValue(),
             });
             closeModal();
             onCreated?.(room);
@@ -106,6 +183,7 @@ export async function openRoomSettings(room, { onChanged }) {
   if (room.archived) archived.checked = true;
   const delegation = el("input", { type: "checkbox" });
   if (room.delegation_enabled ?? true) delegation.checked = true;
+  const workdir = workingDirField(room.working_dir || "");
 
   const reopen = async () => {
     const fresh = await api.getRoom(room.id);
@@ -156,6 +234,7 @@ export async function openRoomSettings(room, { onChanged }) {
         topic: topic.value.trim(),
         default_reply_mode: mode.value,
         delegation_enabled: delegation.checked,
+        working_dir: workdir.getValue(),
         archived: archived.checked,
       });
       onChanged?.();
@@ -170,6 +249,12 @@ export async function openRoomSettings(room, { onChanged }) {
     body: [
       el("div", { class: "field-row" }, [field("Name", name).field, field("Default reply mode", mode).field]),
       field("Topic", topic).field,
+      field(
+        "Working directory",
+        workdir.wrap,
+        "Shared folder this room's personas read/edit. Chat history is not stored here. " +
+          "After changing it, reset a persona's session below so it restarts in the new folder."
+      ).field,
       el("div", { class: "field" }, [
         el("label", { text: "Delegation" }),
         el("label", { class: "hint" }, [

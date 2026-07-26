@@ -108,6 +108,24 @@ def test_list_member_personas_skips_missing(db):
     assert [m.handle for m in members] == ["real"]
 
 
+def test_create_room_auto_adds_dispatcher(service, personas):
+    """A fresh room ships with the orchestrator persona already present, so the
+    operator can tag it to route work without any setup (dispatcher is seeded)."""
+    from app.services.persona_seed import DISPATCHER_HANDLE
+
+    disp = personas.create(
+        Persona(name="systemd", handle=DISPATCHER_HANDLE, provider=Provider.MOCK, model="m")
+    )
+    r = service.create(Room(name="General"))
+    assert disp.id in [m.id for m in service.list_member_personas(r.id)]
+
+
+def test_create_room_without_dispatcher_seeded_is_fine(service):
+    # No dispatcher persona present -> room is simply empty; never crashes.
+    r = service.create(Room(name="Empty"))
+    assert service.list_member_personas(r.id) == []
+
+
 def test_remove_member(service, personas):
     r = service.create(Room(name="General"))
     a = _persona(personas, "alpha")

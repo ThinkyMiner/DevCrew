@@ -28,7 +28,9 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import (
     routes_authors,
+    routes_fs,
     routes_messages,
+    routes_models,
     routes_personas,
     routes_rooms,
     routes_runs,
@@ -57,6 +59,7 @@ from app.persistence.repositories import (
 from app.persistence.run_log import RunLogStore
 from app.services.authors import AuthorService
 from app.services.orchestrator import ChatOrchestrator
+from app.services.persona_seed import ensure_default_personas
 from app.services.personas import PersonaService
 from app.services.rooms import RoomService
 from app.services.session_store import SessionStore
@@ -84,6 +87,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     registry: BackendRegistry | None = None,
+    seed_personas: bool = True,
 ) -> FastAPI:
     settings = settings or default_settings()
     configure_logging()
@@ -115,7 +119,9 @@ def create_app(
     backend_registry = (
         registry
         if registry is not None
-        else build_default_registry(str(settings.resolved_scratch_dir))
+        else build_default_registry(
+            str(settings.resolved_scratch_dir), timeout=settings.harness_timeout
+        )
     )
 
     persona_service = PersonaService(persona_repo)
@@ -135,6 +141,11 @@ def create_app(
 
     # Seed default authors (FR-A1/A3) at startup; idempotent.
     author_service.ensure_defaults()
+    # Seed the default team of personas (incl. the @systemd orchestrator), keyed
+    # by handle so a warm restart never duplicates. Off in tests that build their
+    # own personas (they'd collide with seeded handles); on in production.
+    if seed_personas:
+        ensure_default_personas(persona_repo)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -185,10 +196,12 @@ def create_app(
         return FileResponse(index_html, media_type="text/html")
 
     app.include_router(routes_personas.router)
+    app.include_router(routes_models.router)
     app.include_router(routes_authors.router)
     app.include_router(routes_rooms.router)
     app.include_router(routes_messages.router)
     app.include_router(routes_runs.router)
+    app.include_router(routes_fs.router)
 
     ws.register_ws(app)
 

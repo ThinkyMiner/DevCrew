@@ -39,6 +39,10 @@ class AgentBackend(Protocol):
 
     name: str
     supported_commands: set[str]
+    # Model names this backend accepts, most-recommended first. Backend-owned so
+    # the persona editor's model picker is dynamic (surfaced via GET /models)
+    # instead of a hardcoded frontend list that drifts as models change.
+    supported_models: tuple[str, ...]
 
     def run(self, spec: RunSpec) -> AsyncIterator[StreamEvent]: ...
 

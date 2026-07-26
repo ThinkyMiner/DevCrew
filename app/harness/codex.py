@@ -41,19 +41,32 @@ Real interface (codex-cli 0.130.0, verified locally 2026-06):
 
 from __future__ import annotations
 
-import asyncio
 import json
-import re
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from typing import Protocol, runtime_checkable
+from collections.abc import AsyncGenerator, AsyncIterator
 
-from app.domain.errors import HarnessAuthError, HarnessError, HarnessTimeout
-from app.domain.events import RunDone, StreamEvent
+from app.domain.errors import HarnessError
+from app.domain.events import StreamEvent
 from app.domain.models import PermissionMode
 from app.harness.base import RunSpec
 from app.harness.codex_parser import parse_codex_line, session_id_of
+from app.harness.process import (
+    DEFAULT_TIMEOUT,
+    AsyncioProc,
+    Spawn,
+    make_default_spawn,
+    redact,
+    run_process,
+)
+from app.harness.process import (
+    Proc as Proc,  # re-exported: the harness tests import Proc from this module
+)
 
-_DEFAULT_TIMEOUT = 600.0
+# Back-compat re-exports: the existing harness tests import these names from the
+# adapter module. The implementations now live in app.harness.process.
+_AsyncioProc = AsyncioProc
+_redact = redact
+# codex attaches /dev/null to stdin so the child never blocks on a tty.
+_default_spawn: Spawn = make_default_spawn(provider="codex", stdin_devnull=True)
 
 # Patterns that flag stderr/auth failures requiring re-login rather than a retry.
 _AUTH_PATTERNS = (
@@ -64,25 +77,6 @@ _AUTH_PATTERNS = (
     "invalid api key",
     "401",
 )
-
-# Redaction: scrub obvious token-/key-like material before it lands in
-# errors/logs (AGENTS §4.4 — no secrets in logs). Order matters: more-specific
-# patterns first (mirrors the Claude adapter).
-_REDACT_PATTERNS = (
-    re.compile(r"sk-ant-[A-Za-z0-9_-]{8,}"),  # Anthropic keys (specific)
-    re.compile(r"sk-[A-Za-z0-9_-]{8,}"),  # other OpenAI-style keys (general)
-    re.compile(r"Bearer\s+[A-Za-z0-9._-]+", re.IGNORECASE),
-    re.compile(r"gh[posru]_[A-Za-z0-9]{16,}"),  # GitHub tokens
-    re.compile(r"\b[A-Za-z0-9_-]{40,}\b"),  # long opaque blobs
-)
-
-# Raise the StreamReader line limit well above the default 64 KiB so a single
-# large JSONL line (big command output / agent message) does not trip
-# LimitOverrunError mid-stream. Lines longer than this still convert to a typed
-# HarnessError rather than escaping as a raw ValueError.
-_STDOUT_LINE_LIMIT = 8 * 1024 * 1024
-
-_REDACTED = "[REDACTED]"
 
 # Map our permission model onto Codex's sandbox mode.
 #
@@ -100,135 +94,6 @@ _SANDBOX_FOR_MODE = {
 }
 
 
-def _redact(text: str) -> str:
-    """Replace obvious secret-like substrings with ``[REDACTED]``."""
-    for pattern in _REDACT_PATTERNS:
-        text = pattern.sub(_REDACTED, text)
-    return text
-
-
-@runtime_checkable
-class Proc(Protocol):
-    """A spawned process the adapter streams from (mirrors the Claude adapter)."""
-
-    def stdout_lines(self) -> AsyncIterator[str]:
-        """Async iterator over decoded stdout lines (newline-stripped)."""
-        ...
-
-    async def wait(self) -> int:
-        """Await process exit and return the exit code."""
-        ...
-
-    async def stderr_text(self) -> str:
-        """Return accumulated stderr (decoded), draining concurrently with stdout."""
-        ...
-
-    async def kill(self) -> None:
-        """Terminate and reap the process; idempotent and safe after exit."""
-        ...
-
-
-Spawn = Callable[[list[str], str | None], Awaitable[Proc]]
-
-
-class _AsyncioProc:
-    """Default :class:`Proc` backed by an ``asyncio`` subprocess.
-
-    stderr is drained into an in-memory buffer by a background task started at
-    construction time, so the child can never block writing stderr while we are
-    still reading stdout.
-    """
-
-    def __init__(self, process: asyncio.subprocess.Process) -> None:
-        self._process = process
-        self._stderr_buf = bytearray()
-        self._stderr_task: asyncio.Task[None] | None = None
-        if process.stderr is not None:
-            self._stderr_task = asyncio.create_task(self._drain_stderr(process.stderr))
-
-    async def _drain_stderr(self, reader: asyncio.StreamReader) -> None:
-        """Read stderr to EOF into the in-memory buffer (runs concurrently)."""
-        try:
-            while True:
-                chunk = await reader.read(65536)
-                if not chunk:
-                    break
-                self._stderr_buf.extend(chunk)
-        except ValueError:
-            # A read-limit error on stderr we don't want to leak; whatever was
-            # buffered so far is still returned by stderr_text().
-            return
-
-    async def stdout_lines(self) -> AsyncIterator[str]:
-        stdout = self._process.stdout
-        if stdout is None:
-            raise HarnessError("codex subprocess has no stdout pipe")
-        while True:
-            try:
-                raw = await stdout.readline()
-            except (ValueError, asyncio.LimitOverrunError) as exc:
-                # An over-long line blows past the StreamReader limit; convert to
-                # a typed, redacted error instead of leaking a raw ValueError.
-                raise HarnessError(
-                    f"codex produced an over-long stdout line: {_redact(str(exc))}"
-                ) from exc
-            if not raw:
-                break
-            yield raw.decode("utf-8", errors="replace").rstrip("\n")
-
-    async def wait(self) -> int:
-        return await self._process.wait()
-
-    async def stderr_text(self) -> str:
-        if self._stderr_task is not None:
-            try:
-                await self._stderr_task
-            except asyncio.CancelledError:
-                pass
-        return self._stderr_buf.decode("utf-8", errors="replace")
-
-    async def kill(self) -> None:
-        # Terminate/kill the child if it is still running, then reap it so we
-        # don't leak a zombie or its pipes. Idempotent.
-        if self._process.returncode is None:
-            try:
-                self._process.kill()
-            except ProcessLookupError:
-                pass  # already gone
-            # Drain any data still sitting in the stdout pipe before wait().
-            # asyncio's subprocess wait() can deadlock while a PIPE remains full
-            # (e.g. after a stdout limit overrun); reading to EOF releases it.
-            stdout = self._process.stdout
-            if stdout is not None:
-                try:
-                    while await stdout.read(65536):
-                        pass
-                except (ValueError, asyncio.LimitOverrunError, asyncio.IncompleteReadError):
-                    pass
-            try:
-                await self._process.wait()
-            except ProcessLookupError:
-                pass
-        if self._stderr_task is not None and not self._stderr_task.done():
-            self._stderr_task.cancel()
-            try:
-                await self._stderr_task
-            except asyncio.CancelledError:
-                pass
-
-
-async def _default_spawn(argv: list[str], cwd: str | None) -> Proc:
-    process = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        stdin=asyncio.subprocess.DEVNULL,
-        cwd=cwd,
-        limit=_STDOUT_LINE_LIMIT,
-    )
-    return _AsyncioProc(process)
-
-
 class CodexHarness:
     """:class:`AgentBackend` for the Codex CLI."""
 
@@ -239,12 +104,15 @@ class CodexHarness:
     # advertise NO supported commands conservatively; send_command will raise
     # HarnessError for any command until a live mechanism is confirmed.
     supported_commands: set[str] = set()
+    # Models the codex CLI's ``-m/--model`` accepts (suggestions, not an
+    # allowlist — a persona may type any id the installed codex build supports).
+    supported_models: tuple[str, ...] = ("gpt-5.5-codex", "gpt-5.5")
 
     def __init__(
         self,
         spawn: Spawn = _default_spawn,
         codex_bin: str = "codex",
-        timeout: float = _DEFAULT_TIMEOUT,
+        timeout: float = DEFAULT_TIMEOUT,
         scratch_dir: str | None = None,
     ) -> None:
         self._spawn = spawn
@@ -360,52 +228,28 @@ class CodexHarness:
 
     # -- streaming core ---------------------------------------------------------
 
-    async def _stream(
+    def _stream(
         self, argv: list[str], cwd: str | None, fallback_session_id: str | None
     ) -> AsyncGenerator[StreamEvent, None]:
-        """Spawn ``argv`` and yield normalized events, ending with one RunDone.
+        """Drive the shared :func:`run_process` runner with Codex's callbacks.
 
-        ``fallback_session_id`` seeds the terminal RunDone (e.g. the resumed id)
-        in case the stream never surfaces one.
+        All the subprocess hardening (concurrent stderr drain, kill/reap, the
+        over-long-line guard, timeout, exit-code→error mapping) lives in
+        :mod:`app.harness.process`; this adapter only supplies the Codex argv,
+        parser, session-id extractor, and auth patterns. ``fallback_session_id``
+        seeds the terminal RunDone (e.g. the resumed id).
         """
-        proc = await self._spawn(argv, cwd)
-        session_id = fallback_session_id
-        exit_code = -1  # defensive: never reference unbound if the loop aborts
-
-        try:
-            try:
-                async with asyncio.timeout(self._timeout):
-                    async for line in proc.stdout_lines():
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue  # non-JSON noise — ignore, never crash
-                        if not isinstance(obj, dict):
-                            continue
-                        sid = session_id_of(obj)
-                        if sid is not None:
-                            session_id = sid
-                        for event in parse_codex_line(obj):
-                            yield event
-                    exit_code = await proc.wait()
-            except TimeoutError as exc:
-                raise HarnessTimeout(f"codex run exceeded {self._timeout}s timeout") from exc
-
-            if exit_code != 0:
-                stderr = _redact(await proc.stderr_text())
-                lowered = stderr.lower()
-                if any(pat in lowered for pat in _AUTH_PATTERNS):
-                    raise HarnessAuthError(f"codex not authenticated (exit {exit_code}): {stderr}")
-                raise HarnessError(f"codex exited {exit_code}: {stderr}")
-
-            yield RunDone(session_id=session_id)
-        finally:
-            # Kill/reap the child on EVERY exit path — normal completion, timeout,
-            # exception, or the consumer closing the generator early. Idempotent.
-            await proc.kill()
+        return run_process(
+            argv,
+            cwd,
+            spawn=self._spawn,
+            provider="codex",
+            parse_line=parse_codex_line,
+            session_id_of=session_id_of,
+            auth_patterns=_AUTH_PATTERNS,
+            fallback_session_id=fallback_session_id,
+            timeout=self._timeout,
+        )
 
     # -- AgentBackend implementation -------------------------------------------
 

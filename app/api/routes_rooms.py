@@ -25,7 +25,8 @@ def create_room(body: RoomCreate, service: ServiceDep) -> Room:
 
 @router.get("")
 def list_rooms(service: ServiceDep) -> list[Room]:
-    return service.list()
+    # Sidebar order: most-recently-active conversation first (FR-R sidebar UX).
+    return service.list_recent()
 
 
 @router.get("/{room_id}")

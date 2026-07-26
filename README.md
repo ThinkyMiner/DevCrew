@@ -1,5 +1,7 @@
 # Team
 
+[![ci](https://github.com/ThinkyMiner/DevCrew/actions/workflows/ci.yml/badge.svg)](https://github.com/ThinkyMiner/DevCrew/actions/workflows/ci.yml)
+
 Team is a locally-run, Slack-style group chat where one human collaborates with
 configurable AI personas — each backed by a real **Claude Code** or **Codex** CLI
 harness running as a managed subprocess. You drive the conversation: post
@@ -51,8 +53,11 @@ python -m app.main
 This wires the real `claude`/`codex` adapters and binds loopback only (local
 use). Host/port and storage locations are configurable via `TEAM_`-prefixed env
 vars, e.g. `TEAM_PORT=9000`, `TEAM_DATA_DIR=./mydata` (the db and run logs
-default under `data_dir`). A startup health banner in the UI warns if either CLI
-is missing or unverified.
+default under `data_dir`). `TEAM_HARNESS_TIMEOUT` sets the per-run wall-clock cap
+in seconds (default `36000`, i.e. 10 hours) before a persona's `claude`/`codex`
+child is killed with a `HarnessTimeout` — lower it for tighter runs, raise it for
+very long turns. A startup health banner in the UI warns if either CLI is missing
+or unverified.
 
 ## Run token-free (mock personas)
 

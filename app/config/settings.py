@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     logs_dir: Path | None = None
     claude_bin: str = "claude"
     codex_bin: str = "codex"
+    # Per-run wall-clock cap (seconds) for a single persona harness run, threaded
+    # into both real adapters via build_default_registry. When a claude/codex
+    # child exceeds it, the harness kills the child and raises HarnessTimeout
+    # (surfaced as a per-persona error card). Default is 10 hours so long turns
+    # (deep research / high effort / large resumed context) aren't cut off;
+    # override with TEAM_HARNESS_TIMEOUT for shorter or longer caps. NOTE: a
+    # genuinely hung child now blocks for up to this long before it's reaped.
+    harness_timeout: float = 36000.0
 
     @model_validator(mode="after")
     def _derive_paths(self) -> Settings:

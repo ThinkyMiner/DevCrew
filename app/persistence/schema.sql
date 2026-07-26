@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS room (
     topic              TEXT NOT NULL DEFAULT '',
     default_reply_mode TEXT NOT NULL,
     delegation_enabled INTEGER NOT NULL DEFAULT 1, -- bool: personas may delegate
+    working_dir        TEXT,                       -- shared cwd for the room's personas
     archived           INTEGER NOT NULL DEFAULT 0, -- bool
     created_at         TEXT NOT NULL               -- iso datetime
 );

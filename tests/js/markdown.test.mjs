@@ -15,7 +15,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { tokenizeInline } from "../../app/web/js/markdown.js";
+import { tokenizeInline, parseBlocks } from "../../app/web/js/markdown.js";
 
 // Collapse tokens to a compact representation for assertions.
 const types = (toks) => toks.map((t) => t.type);
@@ -93,4 +93,81 @@ test("bold and italic can coexist", () => {
   assert.deepEqual(types(toks), ["strong", "text", "em"]);
   assert.equal(toks[0].value, "b");
   assert.equal(toks[2].value, "i");
+});
+
+// -- inline links ----------------------------------------------------------
+
+test("link renders a link token with text + href", () => {
+  const toks = tokenizeInline("see [docs](https://x.io/y) now");
+  assert.deepEqual(types(toks), ["text", "link", "text"]);
+  assert.equal(toks[1].value, "docs");
+  assert.equal(toks[1].href, "https://x.io/y");
+});
+
+test("non-link brackets stay plain", () => {
+  const toks = tokenizeInline("an array[0] index");
+  assert.ok(plain(toks), JSON.stringify(types(toks)));
+  assert.equal(text(toks), "an array[0] index");
+});
+
+test("link inside a code span stays literal", () => {
+  const toks = tokenizeInline("`[x](y)`");
+  assert.deepEqual(types(toks), ["code"]);
+  assert.equal(toks[0].value, "[x](y)");
+});
+
+// -- block parsing ---------------------------------------------------------
+
+const blockTypes = (bs) => bs.map((b) => b.type);
+
+test("ATX headings parse to heading blocks with levels", () => {
+  const bs = parseBlocks("# Title\n## Sub\n###### Deep");
+  assert.deepEqual(blockTypes(bs), ["heading", "heading", "heading"]);
+  assert.deepEqual(bs.map((b) => b.level), [1, 2, 6]);
+  assert.equal(bs[0].text, "Title");
+  assert.equal(bs[2].text, "Deep");
+});
+
+test("seven hashes is not a heading (paragraph)", () => {
+  const bs = parseBlocks("####### nope");
+  assert.deepEqual(blockTypes(bs), ["paragraph"]);
+  assert.equal(bs[0].text, "####### nope");
+});
+
+test("unordered list groups consecutive items", () => {
+  const bs = parseBlocks("- one\n- two\n* three");
+  assert.deepEqual(blockTypes(bs), ["list"]);
+  assert.equal(bs[0].ordered, false);
+  assert.deepEqual(bs[0].items, ["one", "two", "three"]);
+});
+
+test("ordered list keeps order flag", () => {
+  const bs = parseBlocks("1. first\n2. second");
+  assert.deepEqual(blockTypes(bs), ["list"]);
+  assert.equal(bs[0].ordered, true);
+  assert.deepEqual(bs[0].items, ["first", "second"]);
+});
+
+test("blockquote groups consecutive quote lines", () => {
+  const bs = parseBlocks("> a\n> b\nnormal");
+  assert.deepEqual(blockTypes(bs), ["blockquote", "paragraph"]);
+  assert.equal(bs[0].text, "a\nb");
+});
+
+test("--- on its own line is a horizontal rule", () => {
+  const bs = parseBlocks("above\n\n---\n\nbelow");
+  assert.deepEqual(blockTypes(bs), ["paragraph", "hr", "paragraph"]);
+});
+
+test("fenced code block is one literal block", () => {
+  const bs = parseBlocks("text\n```\n# not a heading\n- not a list\n```\nafter");
+  assert.deepEqual(blockTypes(bs), ["paragraph", "code", "paragraph"]);
+  assert.equal(bs[1].text, "# not a heading\n- not a list");
+});
+
+test("blank lines split paragraphs", () => {
+  const bs = parseBlocks("one\ntwo\n\nthree");
+  assert.deepEqual(blockTypes(bs), ["paragraph", "paragraph"]);
+  assert.equal(bs[0].text, "one\ntwo");
+  assert.equal(bs[1].text, "three");
 });

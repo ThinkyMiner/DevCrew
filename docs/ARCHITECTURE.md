@@ -73,16 +73,23 @@ files — they carry the load.
 ### harness/ — the only subprocess layer (~1500 lines)
 - `base.py` — `RunSpec` (everything a backend needs for one run) + the
   `AgentBackend` Protocol (`name`, `supported_commands`, `run`, `send_command`).
+- **`process.py`** — the shared **deep subprocess runner**. Owns ALL real-
+  subprocess hardening once: the `Proc` protocol + `AsyncioProc`, concurrent
+  stderr drain, kill/reap on every exit path, bounded stdout lines, secret
+  redaction (`redact`), the run timeout, the exit-code→typed-error map, and the
+  adapter-owned terminal `RunDone`. `run_process(argv, cwd, *, spawn, provider,
+  parse_line, session_id_of, auth_patterns, …)` takes the provider-specific bits
+  as injected callbacks. See DECISIONS.md D7–D9. (The adapters used to copy-paste
+  this machinery; now there's one place to fix it.)
 - **`claude.py`** / `claude_parser.py` — `ClaudeHarness` + the pure stream-json
-  parser. The parser holds ALL Claude wire-format knowledge; the adapter spawns
-  the process, streams events, captures the `session_id`, and emits the terminal
-  `RunDone`. Real-subprocess hardening lives here: concurrent stderr drain,
-  kill/reap on every exit path, bounded stdout lines, secret redaction, typed
-  errors, the `--` end-of-options guard, the PermissionMode→claude-vocab map, and
-  the neutral-cwd isolation. See DECISIONS.md D7–D9.
-- **`codex.py`** / `codex_parser.py` — `CodexHarness` + its parser, mirroring the
-  hardened Claude pattern for `codex exec` (resume is a subcommand:
-  `codex exec resume <thread_id>`). Maps PermissionMode→`--sandbox`.
+  parser. The parser holds ALL Claude wire-format knowledge; the adapter builds
+  the argv (the `--` end-of-options guard, the PermissionMode→claude-vocab map,
+  the neutral-cwd isolation) and delegates streaming to `process.run_process`,
+  supplying `parse_claude_line` + the Claude `session_id_of` + auth patterns.
+- **`codex.py`** / `codex_parser.py` — `CodexHarness` + its parser, same shape for
+  `codex exec` (resume is a subcommand: `codex exec resume <thread_id>`). Maps
+  PermissionMode→`--sandbox`; delegates streaming to `process.run_process` (its
+  spawn attaches `/dev/null` to stdin).
 - `mock.py` — **`MockHarness`**: deterministic, scriptable backend. The backbone of
   every default test (no real CLI, no tokens). Fails loud on ambiguous script
   matches. Read this before writing orchestrator/api tests.
@@ -105,27 +112,51 @@ files — they carry the load.
 - **`orchestrator.py`** — `ChatOrchestrator`, the keystone. `post_message(...)` is
   an async generator yielding `(persona_id, StreamEvent)`; `send_control(...)` runs
   a session command (`/compact`). Owns routing, sequential vs parallel turns,
-  prompt assembly, session resume + pointer advance, RunRecord + run-log, per-
-  persona error isolation, and `run_id` threading. See §4.
-- `transcript.py` — pure `build_delta` / `delta_messages` (the single source of the
-  "messages after the last-seen pointer" slice; raises `TranscriptError` on an
-  unknown pointer) + `render_quotes`.
+  session resume + pointer advance, per-persona error isolation, and `run_id`
+  threading. Prompt assembly is delegated to `transcript.assemble_context`; the
+  RunRecord + run-log + `run_id`-var lifecycle is delegated to `run_scope`. See §4.
+- `transcript.py` — pure rendering. `delta_messages` is the single source of the
+  "messages after the last-seen pointer" slice (raises `TranscriptError` on an
+  unknown pointer); `render_delta` / `render_quotes` render a slice; `build_delta`
+  composes the first two. **`assemble_context`** is the deep seam the orchestrator
+  crosses: it slices **once** and uses that one slice to render the delta AND to
+  de-dup quotes (a quoted message already in the delta isn't re-rendered), so the
+  two can't drift. Pure — the caller pre-resolves quoted `Message`s.
 - `prompt.py` — pure `assemble_prompt`: order is **author weight note → quotes →
   delta → directed line**.
+- `run_scope.py` — `run_scope(...)` context manager: the RunRecord + run-log +
+  `run_id`-var lifecycle (create on entry; finalize exit-code/finish-time/persist
+  + reset the ContextVar on every exit path). Shared by `_run_turn` and
+  `send_control`; the body sets `run.error_kind`/`run.usage`, the scope finalizes.
 - `routing.py` + `mentions.py` — resolve `@handle`/`@everyone` targets; the shared
   mention regex mirrors the backend handle grammar (and the JS `mentions.js`).
 - `personas.py` / `rooms.py` / `authors.py` / `session_store.py` — CRUD facades
   that add value over the repos (duplicate, templates, `ensure_defaults()` seeding
-  Me+Boss, `reset_session`, in-flight tracking).
+  Me+Boss, `reset_session`, in-flight tracking). `rooms.create` also auto-adds the
+  `@systemd` orchestrator as a member (zero-setup routing); `rooms.list_recent`
+  orders rooms most-recently-active first (the sidebar order).
+- `persona_seed.py` — the canonical **default team**: `DEFAULT_PERSONAS` (human
+  first-names + role `job`s + layered prompts) and the `@systemd` **orchestrator**
+  (tag it with a goal; it decomposes the work and @-mentions the right teammates,
+  which the existing delegation loop turns into real teammate turns — no new agent
+  loop). `ensure_default_personas(repo)` seeds any missing handle at startup
+  (idempotent). One-off cleanup of a pre-existing DB (dedupe the old `-copy`
+  personas, human-name rename, ensure `@systemd`) lives in
+  `scripts/migrate_personas.py`.
 
 ### api/ — thin transport (~430 lines)
 - `app_factory.py` — **the composition root**: configures logging, ensures dirs +
   the neutral persona scratch dir, opens the db, builds repos/services/orchestrator,
   builds the registry (real adapters unless one is injected), seeds default
-  authors, mounts routers + `/static` + `GET /`, registers the WS endpoint and the
-  centralized `TeamError`→HTTP handler, and closes the db on lifespan shutdown.
+  authors + the default persona team (`seed_personas=True`, off in tests that
+  build their own personas), mounts routers + `/static` + `GET /`, registers the
+  WS endpoint and the centralized `TeamError`→HTTP handler, and closes the db on
+  lifespan shutdown.
 - `routes_*.py` — REST CRUD for personas/authors/rooms(+members)/messages, plus
-  `GET /runs/{run_id}/log` (path-traversal-guarded) and a persona session reset.
+  `GET /runs/{run_id}/log` (path-traversal-guarded), a persona session reset, and
+  `GET /models` — the dynamic, backend-owned model catalog (`{provider:[model]}`
+  from each harness's `supported_models`) that feeds the editor's model picker, so
+  the list follows the real adapters (e.g. `fable`) instead of a hardcoded one.
 - `ws.py` — `/ws/rooms/{room_id}`: drives the orchestrator on the event loop and
   streams frames (see §5). `deps.py` provides services from `app.state`;
   `schemas.py` are the write bodies; `health.py` is the PATH-presence check.
@@ -221,7 +252,10 @@ threadpool) so the shared sqlite connection's per-thread RLock is never crossed.
    (the only exception is the opt-in `pytest -m live`).
 7. **Frontend is buildless + XSS-safe.** No bundler/npm/CDN; no `innerHTML`.
 8. **Personas with no `working_dir` run in the neutral scratch cwd** (outside the
-   project tree) so they don't inherit this repo's CLAUDE.md/AGENTS.md.
+   project tree) so they don't inherit this repo's CLAUDE.md/AGENTS.md. A room's
+   shared `working_dir` (set in room settings) takes precedence over a persona's
+   own; the resolved dir is the harness cwd + `--add-dir`. The chat itself is
+   never stored there — it always lives under `data_dir` (DB + run logs).
 
 ## 7. Where to change common things
 

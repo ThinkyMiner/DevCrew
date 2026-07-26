@@ -70,8 +70,14 @@ function multiPick(suggestions, selected) {
 export async function openPersonaManager({ onChange } = {}) {
   let personas = [];
   let templates = [];
+  let modelsByProvider = {};
   try {
-    [personas, templates] = await Promise.all([api.listPersonas(), api.listTemplates()]);
+    [personas, templates, modelsByProvider] = await Promise.all([
+      api.listPersonas(),
+      api.listTemplates(),
+      // Best-effort: an empty map just falls back to built-in model suggestions.
+      api.listModels().catch(() => ({})),
+    ]);
   } catch (e) {
     toast(e.kind, e.message);
     return;
@@ -97,7 +103,7 @@ export async function openPersonaManager({ onChange } = {}) {
             text: `${p.job ? p.job + " · " : ""}${p.provider} · ${p.model}${p.effort ? " · " + p.effort : ""}`,
           }),
         ]),
-        el("button", { class: "btn tiny", text: "Edit", onClick: () => openPersonaEditor({ persona: p, onSaved: refresh, allPersonas: personas }) }),
+        el("button", { class: "btn tiny", text: "Edit", onClick: () => openPersonaEditor({ persona: p, onSaved: refresh, allPersonas: personas, modelsByProvider }) }),
         el("button", {
           class: "btn tiny",
           text: "Duplicate",
@@ -163,13 +169,13 @@ export async function openPersonaManager({ onChange } = {}) {
       templateList,
     ],
     footer: [
-      el("button", { class: "btn primary", text: "New persona", onClick: () => openPersonaEditor({ onSaved: refresh, allPersonas: personas }) }),
+      el("button", { class: "btn primary", text: "New persona", onClick: () => openPersonaEditor({ onSaved: refresh, allPersonas: personas, modelsByProvider }) }),
       el("button", { class: "btn", text: "Close", onClick: closeModal }),
     ],
   });
 }
 
-export function openPersonaEditor({ persona, onSaved, allPersonas = [] }) {
+export function openPersonaEditor({ persona, onSaved, allPersonas = [], modelsByProvider = {} }) {
   const p = persona || {};
   const isNew = !p.id;
   const f = {};
@@ -188,7 +194,7 @@ export function openPersonaEditor({ persona, onSaved, allPersonas = [] }) {
   const modelList = el("datalist", { id: "persona-model-suggest" });
   const fillModelList = () => {
     modelList.replaceChildren();
-    for (const m of modelSuggestionsFor(f.provider.value, allPersonas)) {
+    for (const m of modelSuggestionsFor(f.provider.value, modelsByProvider, allPersonas)) {
       modelList.append(el("option", { value: m }));
     }
   };

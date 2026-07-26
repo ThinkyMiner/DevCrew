@@ -15,7 +15,11 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "httpx>=0.27",          # FastAPI TestClient / async client
-    "ruff>=0.5",
+    # Pin ruff to a minor: its formatter behavior changes across minors (0.16
+    # started reformatting Markdown code blocks), and an unpinned `>=` let CI
+    # drift ahead of local and fail `ruff format --check` on a doc. Bump
+    # deliberately, re-running the gates, not implicitly on every CI run.
+    "ruff~=0.16.0",
     "mypy>=1.10",
 ]
 
@@ -39,6 +43,13 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Keep the formatter off Markdown. Ruff >=0.16 reformats Python code blocks
+# embedded in *.md; our design docs (docs/plans/*) carry illustrative,
+# intentionally-unformatted snippets, so the formatter must not touch prose —
+# it should police source, not documentation. (This drift — CI's newer ruff
+# flagging a doc the local older ruff ignored — is why the ruff pin below is
+# now exact-minor.)
+extend-exclude = ["*.md"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 

@@ -254,7 +254,7 @@ def _fake_clis(monkeypatch):
 
 def test_full_conversation_proves_seven_success_criteria(e2e_settings):
     mocks = Mocks(claude=MockHarness(), codex=MockHarness())
-    app = create_app(e2e_settings, registry=_build_registry(mocks))
+    app = create_app(e2e_settings, registry=_build_registry(mocks), seed_personas=False)
     client = TestClient(app)
 
     # === STEP 1: multi-persona group chat setup (criterion 1) ================
@@ -508,7 +508,7 @@ def test_full_conversation_proves_seven_success_criteria(e2e_settings):
     # resume_session_id it receives, so resume can only succeed if the restarted
     # app loaded the stored id from the db (not from any in-memory mock counter).
     restart_mocks = Mocks(claude=MockHarness(), codex=MockHarness())
-    app2 = create_app(e2e_settings, registry=_build_registry(restart_mocks))
+    app2 = create_app(e2e_settings, registry=_build_registry(restart_mocks), seed_personas=False)
     client2 = TestClient(app2)
 
     # Transcript reloaded intact from the same db.

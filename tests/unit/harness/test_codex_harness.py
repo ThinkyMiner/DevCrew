@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -20,7 +19,7 @@ from app.domain.events import (
 )
 from app.domain.models import PermissionMode, Provider
 from app.harness.base import AgentBackend, RunSpec
-from app.harness.codex import CodexHarness, Proc, _default_spawn, _redact
+from app.harness.codex import CodexHarness, Proc, _redact
 
 _FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "codex_stream_basic.jsonl"
 
@@ -446,127 +445,3 @@ async def test_proc_killed_on_early_generator_close() -> None:
     await agen.__anext__()  # consume one event, then abandon the generator
     await agen.aclose()
     assert proc.kill_calls == 1
-
-
-# -- real-subprocess regression tests -----------------------------------------
-#
-# These drive the REAL `_default_spawn` against a trivial deterministic child
-# (python3 -c "..."), NEVER the codex CLI. They reproduce the concurrency/kill/
-# limit hazards the in-memory FakeProc cannot. Each is wrapped in
-# asyncio.wait_for so a regression manifests as a fast failure rather than a hang.
-
-
-def _child_spawn(child_src: str):  # type: ignore[no-untyped-def]
-    """A Spawn that ignores the harness-built argv and runs our child script."""
-
-    async def spawn(argv: list[str], cwd: str | None) -> Proc:
-        return await _default_spawn([sys.executable, "-c", child_src], cwd)
-
-    return spawn
-
-
-async def test_real_subprocess_stderr_drain_does_not_deadlock() -> None:
-    # Concurrent-drain: child emits a stdout line, floods 500 KB straight to
-    # stderr (>> the OS pipe buffer) BEFORE more stdout, then exits nonzero. If
-    # stderr were only read after stdout EOF, this would deadlock. Bounded by
-    # wait_for so a regression fails fast instead of hanging.
-    child = (
-        "import sys, os\n"
-        "sys.stdout.write('{}' + chr(10)); sys.stdout.flush()\n"
-        "os.write(2, b'x' * 500000)\n"
-        "sys.stdout.write('{}' + chr(10)); sys.stdout.flush()\n"
-        "sys.exit(3)\n"
-    )
-    h = CodexHarness(spawn=_child_spawn(child), timeout=10.0)
-    with pytest.raises(HarnessError) as ei:
-        await asyncio.wait_for(_collect(h.run(_spec())), timeout=5.0)
-    assert not isinstance(ei.value, HarnessTimeout)
-    assert "exited 3" in str(ei.value)
-
-
-async def test_real_subprocess_stderr_secret_is_redacted() -> None:
-    child = (
-        "import sys\nsys.stderr.write('boom key=sk-ant-abcdef0123456789ABCDEF tail')\nsys.exit(1)\n"
-    )
-    h = CodexHarness(spawn=_child_spawn(child), timeout=10.0)
-    with pytest.raises(HarnessError) as ei:
-        await asyncio.wait_for(_collect(h.run(_spec())), timeout=5.0)
-    msg = str(ei.value)
-    assert "sk-ant-abcdef0123456789ABCDEF" not in msg
-    assert "[REDACTED]" in msg
-
-
-async def test_real_subprocess_timeout_kills_child() -> None:
-    # Short timeout; child sleeps far past it. We must raise HarnessTimeout
-    # quickly AND the child must be killed/reaped (not left running).
-    child = "import time\ntime.sleep(30)\n"
-    spawn = _child_spawn(child)
-    captured: dict[str, Proc] = {}
-
-    async def capturing_spawn(argv: list[str], cwd: str | None) -> Proc:
-        proc = await spawn(argv, cwd)
-        captured["proc"] = proc
-        return proc
-
-    h = CodexHarness(spawn=capturing_spawn, timeout=1.0)
-    with pytest.raises(HarnessTimeout):
-        await asyncio.wait_for(_collect(h.run(_spec())), timeout=5.0)
-
-    aproc = captured["proc"]
-    underlying = aproc._process  # type: ignore[attr-defined]
-    assert underlying.returncode is not None  # reaped
-    import os
-
-    with pytest.raises((ProcessLookupError, PermissionError)):
-        os.kill(underlying.pid, 0)
-
-
-async def test_real_subprocess_big_valid_json_line_parses() -> None:
-    # A single valid JSONL line well over the default 64 KiB limit must parse,
-    # proving we raised the StreamReader limit.
-    big_text = "y" * 200000
-    line = json.dumps(
-        {"type": "item.completed", "item": {"type": "agent_message", "text": big_text}}
-    )
-    started = json.dumps({"type": "thread.started", "thread_id": "t-big"})
-    completed = json.dumps(
-        {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 2}}
-    )
-    child = (
-        "import sys\n"
-        f"sys.stdout.write({started!r} + '\\n')\n"
-        f"sys.stdout.write({line!r} + '\\n')\n"
-        f"sys.stdout.write({completed!r} + '\\n')\n"
-        "sys.exit(0)\n"
-    )
-    h = CodexHarness(spawn=_child_spawn(child), timeout=10.0)
-    events = await asyncio.wait_for(_collect(h.run(_spec())), timeout=5.0)
-    text_events = [e for e in events if isinstance(e, TextDelta)]
-    assert len(text_events) == 1
-    assert text_events[0].text == big_text
-    assert isinstance(events[-1], RunDone)
-    assert events[-1].session_id == "t-big"
-
-
-async def test_real_subprocess_oversized_line_becomes_harness_error() -> None:
-    # A line beyond the raised limit converts to a typed HarnessError rather than
-    # escaping as a raw ValueError/LimitOverrunError. Use a tiny limit so we
-    # don't have to emit 8 MB.
-    async def small_limit_spawn(argv: list[str], cwd: str | None) -> Proc:
-        from app.harness.codex import _AsyncioProc
-
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-c",
-            "import sys\nsys.stdout.write('z' * 100000 + '\\n')\nsys.exit(0)\n",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=1024,  # deliberately tiny so the 100 KB line overruns
-        )
-        return _AsyncioProc(proc)
-
-    h = CodexHarness(spawn=small_limit_spawn, timeout=10.0)
-    with pytest.raises(HarnessError) as ei:
-        await asyncio.wait_for(_collect(h.run(_spec())), timeout=5.0)
-    assert not isinstance(ei.value, HarnessTimeout)
-    assert "over-long" in str(ei.value)

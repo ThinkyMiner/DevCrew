@@ -96,8 +96,22 @@ class Room(BaseModel):
     # to that persona (auto-adding them to the room if needed), bounded by the
     # orchestrator's depth/run caps. The per-room off switch.
     delegation_enabled: bool = True
+    # Shared working directory for the room: every persona's harness session runs
+    # in (and is granted access to) this dir, so the whole team reads/edits the
+    # same repo. Takes precedence over a persona's own working_dir. None → each
+    # persona falls back to its own working_dir (or the neutral scratch cwd). The
+    # chat itself is NEVER stored here — it lives in the configured data_dir.
+    working_dir: str | None = None
     archived: bool = False
     created_at: datetime = Field(default_factory=_now)
+
+
+# In-band prefix of an error-marker Message ("[error: <kind>] <msg>") — written
+# by the orchestrator, parsed by the frontend, and exempted from own-message
+# delta filtering (a failed turn may not exist in the persona's harness session,
+# so hiding the marker would hide the failure). One constant so the writers and
+# readers can never drift.
+ERROR_MARKER_PREFIX = "[error:"
 
 
 class Message(BaseModel):
@@ -116,6 +130,9 @@ class Message(BaseModel):
     @classmethod
     def _dedupe_quoted(cls, v: list[str]) -> list[str]:
         return list(dict.fromkeys(v))
+
+    def is_error_marker(self) -> bool:
+        return self.content.startswith(ERROR_MARKER_PREFIX)
 
 
 class PersonaSession(BaseModel):

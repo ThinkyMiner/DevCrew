@@ -23,6 +23,7 @@ from app.domain.models import Provider
 from app.harness.base import AgentBackend
 from app.harness.claude import ClaudeHarness
 from app.harness.codex import CodexHarness
+from app.harness.process import DEFAULT_TIMEOUT
 
 
 class BackendRegistry:
@@ -44,8 +45,20 @@ class BackendRegistry:
                 f"no backend registered for provider {provider.value!r}"
             ) from exc
 
+    def list_models(self) -> dict[str, list[str]]:
+        """Provider value -> its backend's ``supported_models``, for every wired
+        backend. This is the single source for the persona editor's model picker:
+        the list follows whatever adapters are actually registered, so it can
+        never drift from what the backends really accept."""
+        return {
+            provider.value: list(backend.supported_models)
+            for provider, backend in self._backends.items()
+        }
 
-def build_default_registry(scratch_dir: str | None = None) -> BackendRegistry:
+
+def build_default_registry(
+    scratch_dir: str | None = None, timeout: float = DEFAULT_TIMEOUT
+) -> BackendRegistry:
     """Build a fresh registry wired with the real CLI adapters.
 
     ``CLAUDE`` -> :class:`ClaudeHarness`, ``CODEX`` -> :class:`CodexHarness`.
@@ -58,10 +71,17 @@ def build_default_registry(scratch_dir: str | None = None) -> BackendRegistry:
     advisory persona's claude/codex child runs in a doc-free directory instead of
     the server's project cwd. When ``None``, the adapters fall back to their
     pre-isolation behavior (back-compat).
+
+    ``timeout`` is the per-run wall-clock cap (seconds) applied to BOTH adapters
+    before the harness kills the child and raises :class:`HarnessTimeout`. It
+    defaults to the conservative :data:`~app.harness.process.DEFAULT_TIMEOUT`;
+    the composition root passes ``settings.harness_timeout`` so the operator can
+    raise it for long persona turns (deep research/high effort) via
+    ``TEAM_HARNESS_TIMEOUT``.
     """
     registry = BackendRegistry()
-    registry.register(Provider.CLAUDE, ClaudeHarness(scratch_dir=scratch_dir))
-    registry.register(Provider.CODEX, CodexHarness(scratch_dir=scratch_dir))
+    registry.register(Provider.CLAUDE, ClaudeHarness(scratch_dir=scratch_dir, timeout=timeout))
+    registry.register(Provider.CODEX, CodexHarness(scratch_dir=scratch_dir, timeout=timeout))
     return registry
 
 

@@ -16,19 +16,31 @@ This adapter tracks the session id across lines and emits exactly one terminal
 
 from __future__ import annotations
 
-import asyncio
 import json
-import re
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from typing import Protocol, runtime_checkable
+from collections.abc import AsyncGenerator, AsyncIterator
 
-from app.domain.errors import HarnessAuthError, HarnessError, HarnessTimeout
-from app.domain.events import RunDone, StreamEvent
+from app.domain.errors import HarnessError
+from app.domain.events import StreamEvent
 from app.domain.models import PermissionMode
 from app.harness.base import RunSpec
 from app.harness.claude_parser import parse_claude_line, session_id_of
+from app.harness.process import (
+    DEFAULT_TIMEOUT,
+    AsyncioProc,
+    Spawn,
+    make_default_spawn,
+    redact,
+    run_process,
+)
+from app.harness.process import (
+    Proc as Proc,  # re-exported: the harness tests import Proc from this module
+)
 
-_DEFAULT_TIMEOUT = 600.0
+# Back-compat re-exports: the existing harness tests import these names from the
+# adapter module. The implementations now live in app.harness.process.
+_AsyncioProc = AsyncioProc
+_redact = redact
+_default_spawn: Spawn = make_default_spawn(provider="claude")
 
 # Persona environment isolation flags (verified live against claude-cli 2.1.159).
 # Applied to EVERY invocation (initial run + resume) so a persona behaves ONLY per
@@ -78,181 +90,24 @@ _AUTH_PATTERNS = (
     "401",
 )
 
-# Redaction: scrub obvious token-/key-like material before it lands in errors/logs
-# (AGENTS §4.4 — no secrets in logs). Best-effort, intentionally conservative.
-# Order matters: more-specific patterns first so a general one cannot consume a
-# substring that a specific one is meant to catch (M1).
-_REDACT_PATTERNS = (
-    re.compile(r"sk-ant-[A-Za-z0-9_-]{8,}"),  # Anthropic keys (specific)
-    re.compile(r"sk-[A-Za-z0-9_-]{8,}"),  # other OpenAI-style keys (general)
-    re.compile(r"Bearer\s+[A-Za-z0-9._-]+", re.IGNORECASE),
-    re.compile(r"gh[posru]_[A-Za-z0-9]{16,}"),  # GitHub tokens
-    re.compile(r"\b[A-Za-z0-9_-]{40,}\b"),  # long opaque blobs
-)
-
-# Raise the StreamReader line limit well above the default 64 KiB so a single
-# large stream-json line (big tool_result / assistant message) does not trip
-# LimitOverrunError mid-stream (I2). Lines longer than this still convert to a
-# typed HarnessError rather than escaping as a raw ValueError.
-_STDOUT_LINE_LIMIT = 8 * 1024 * 1024
-
-_REDACTED = "[REDACTED]"
-
-
-def _redact(text: str) -> str:
-    """Replace obvious secret-like substrings with ``[REDACTED]``."""
-    for pattern in _REDACT_PATTERNS:
-        text = pattern.sub(_REDACTED, text)
-    return text
-
-
-@runtime_checkable
-class Proc(Protocol):
-    """A spawned process the adapter streams from.
-
-    A fake implementation in tests yields the fixture lines from
-    :attr:`stdout_lines`, then reports :attr:`returncode`/:attr:`stderr_text`.
-    """
-
-    def stdout_lines(self) -> AsyncIterator[str]:
-        """Async iterator over decoded stdout lines (newline-stripped)."""
-        ...
-
-    async def wait(self) -> int:
-        """Await process exit and return the exit code."""
-        ...
-
-    async def stderr_text(self) -> str:
-        """Return accumulated stderr (decoded).
-
-        Implementations MUST drain stderr concurrently with stdout (so a child
-        writing a large volume to stderr cannot deadlock against a full pipe).
-        This call awaits that drain finishing and returns the buffered text.
-        """
-        ...
-
-    async def kill(self) -> None:
-        """Terminate and reap the process; idempotent and safe after exit.
-
-        Called from a ``finally`` on every exit path so a timeout, exception, or
-        early generator close cannot leak the child or its pipes (C2).
-        """
-        ...
-
-
-Spawn = Callable[[list[str], str | None], Awaitable[Proc]]
-
-
-class _AsyncioProc:
-    """Default :class:`Proc` backed by an ``asyncio`` subprocess.
-
-    stderr is drained into an in-memory buffer by a background task started at
-    construction time, so the child can never block writing stderr while we are
-    still reading stdout (C1).
-    """
-
-    def __init__(self, process: asyncio.subprocess.Process) -> None:
-        self._process = process
-        self._stderr_buf = bytearray()
-        self._stderr_task: asyncio.Task[None] | None = None
-        if process.stderr is not None:
-            # Constructed inside an async spawn, so a running loop is guaranteed.
-            self._stderr_task = asyncio.create_task(self._drain_stderr(process.stderr))
-
-    async def _drain_stderr(self, reader: asyncio.StreamReader) -> None:
-        """Read stderr to EOF into the in-memory buffer (runs concurrently)."""
-        try:
-            while True:
-                chunk = await reader.read(65536)
-                if not chunk:
-                    break
-                self._stderr_buf.extend(chunk)
-        except ValueError:
-            # A read-limit error on stderr we don't want to leak; whatever was
-            # buffered so far is still returned by stderr_text().
-            return
-
-    async def stdout_lines(self) -> AsyncIterator[str]:
-        stdout = self._process.stdout
-        if stdout is None:
-            raise HarnessError("claude subprocess has no stdout pipe")
-        while True:
-            try:
-                raw = await stdout.readline()
-            except (ValueError, asyncio.LimitOverrunError) as exc:
-                # An over-long line blows past the StreamReader limit; convert to
-                # a typed, redacted error instead of leaking a raw ValueError (I2).
-                raise HarnessError(
-                    f"claude produced an over-long stdout line: {_redact(str(exc))}"
-                ) from exc
-            if not raw:
-                break
-            yield raw.decode("utf-8", errors="replace").rstrip("\n")
-
-    async def wait(self) -> int:
-        return await self._process.wait()
-
-    async def stderr_text(self) -> str:
-        if self._stderr_task is not None:
-            try:
-                await self._stderr_task
-            except asyncio.CancelledError:
-                pass
-        return self._stderr_buf.decode("utf-8", errors="replace")
-
-    async def kill(self) -> None:
-        # Terminate/kill the child if it is still running, then reap it so we
-        # don't leak a zombie or its pipes. Idempotent (C2).
-        if self._process.returncode is None:
-            try:
-                self._process.kill()
-            except ProcessLookupError:
-                pass  # already gone
-            # Drain any data still sitting in the stdout pipe before wait().
-            # asyncio's subprocess wait() can deadlock while a PIPE remains full
-            # (e.g. after a stdout limit overrun, the unread bytes block exit
-            # reaping); reading to EOF releases it.
-            stdout = self._process.stdout
-            if stdout is not None:
-                try:
-                    while await stdout.read(65536):
-                        pass
-                except (ValueError, asyncio.LimitOverrunError, asyncio.IncompleteReadError):
-                    pass
-            try:
-                await self._process.wait()
-            except ProcessLookupError:
-                pass
-        if self._stderr_task is not None and not self._stderr_task.done():
-            self._stderr_task.cancel()
-            try:
-                await self._stderr_task
-            except asyncio.CancelledError:
-                pass
-
-
-async def _default_spawn(argv: list[str], cwd: str | None) -> Proc:
-    process = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
-        limit=_STDOUT_LINE_LIMIT,
-    )
-    return _AsyncioProc(process)
-
 
 class ClaudeHarness:
     """:class:`AgentBackend` for the Claude Code CLI."""
 
     name = "claude"
     supported_commands: set[str] = {"/compact", "/clear"}
+    # Model aliases the claude CLI's ``--model`` accepts (most-capable first). The
+    # CLI resolves an alias to the latest model of that family, so we keep aliases
+    # (not pinned ids) and let it stay current. ``fable`` is a current alias
+    # (``claude-fable-5``); a persona may still type a full id — the field is a
+    # suggestion, not an allowlist (see _normalize_model).
+    supported_models: tuple[str, ...] = ("opus", "sonnet", "haiku", "fable")
 
     def __init__(
         self,
         spawn: Spawn = _default_spawn,
         claude_bin: str = "claude",
-        timeout: float = _DEFAULT_TIMEOUT,
+        timeout: float = DEFAULT_TIMEOUT,
         scratch_dir: str | None = None,
     ) -> None:
         self._spawn = spawn
@@ -393,53 +248,28 @@ class ClaudeHarness:
 
     # -- streaming core ---------------------------------------------------------
 
-    async def _stream(
+    def _stream(
         self, argv: list[str], cwd: str | None, fallback_session_id: str | None
     ) -> AsyncGenerator[StreamEvent, None]:
-        """Spawn ``argv`` and yield normalized events, ending with one RunDone.
+        """Drive the shared :func:`run_process` runner with Claude's callbacks.
 
-        ``fallback_session_id`` seeds the terminal RunDone (e.g. the resumed id)
-        in case the stream never surfaces one.
+        All the subprocess hardening (concurrent stderr drain, kill/reap, the
+        over-long-line guard, timeout, exit-code→error mapping) lives in
+        :mod:`app.harness.process`; this adapter only supplies the Claude argv,
+        parser, session-id extractor, and auth patterns. ``fallback_session_id``
+        seeds the terminal RunDone (e.g. the resumed id).
         """
-        proc = await self._spawn(argv, cwd)
-        session_id = fallback_session_id
-        exit_code = -1  # defensive: never reference unbound if the loop aborts (I1)
-
-        try:
-            try:
-                async with asyncio.timeout(self._timeout):
-                    async for line in proc.stdout_lines():
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue  # non-JSON noise — ignore, never crash
-                        if not isinstance(obj, dict):
-                            continue
-                        sid = session_id_of(obj)
-                        if sid is not None:
-                            session_id = sid
-                        for event in parse_claude_line(obj):
-                            yield event
-                    exit_code = await proc.wait()
-            except TimeoutError as exc:
-                raise HarnessTimeout(f"claude run exceeded {self._timeout}s timeout") from exc
-
-            if exit_code != 0:
-                stderr = _redact(await proc.stderr_text())
-                lowered = stderr.lower()
-                if any(pat in lowered for pat in _AUTH_PATTERNS):
-                    raise HarnessAuthError(f"claude not authenticated (exit {exit_code}): {stderr}")
-                raise HarnessError(f"claude exited {exit_code}: {stderr}")
-
-            yield RunDone(session_id=session_id)
-        finally:
-            # Kill/reap the child on EVERY exit path — normal completion, timeout,
-            # exception, or the consumer closing the generator early
-            # (GeneratorExit/cancellation). Idempotent and safe if already exited (C2).
-            await proc.kill()
+        return run_process(
+            argv,
+            cwd,
+            spawn=self._spawn,
+            provider="claude",
+            parse_line=parse_claude_line,
+            session_id_of=session_id_of,
+            auth_patterns=_AUTH_PATTERNS,
+            fallback_session_id=fallback_session_id,
+            timeout=self._timeout,
+        )
 
     # -- AgentBackend implementation -------------------------------------------
 

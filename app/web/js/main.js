@@ -289,7 +289,12 @@ function openSocket(roomId, token) {
       error_card: (frame) => state.transcript.appendErrorCard(frame.persona_id, frame),
       // Canonical-id contract: refetch on end-of-turn to reconcile optimistic
       // bubbles (which have no persisted id/run_id) to the canonical messages.
-      turn_complete: () => refreshMessages(),
+      // Also re-sort the sidebar so the just-active room floats to the top
+      // (rooms are ordered most-recently-active first).
+      turn_complete: () => {
+        refreshMessages();
+        loadRooms();
+      },
       // A console command turn also persists/changes state; reconcile so the
       // transcript reflects it and no partial bubble lingers.
       command_complete: () => refreshMessages(),
