@@ -213,3 +213,65 @@ reply, and so on.
   auto-added persona appears in the header/roster. Attribution remains forgeable
   (D3/OQ-4): a message body could fake a `@handle` — accepted for the local
   single-user model, and bounded by the caps regardless.
+
+## D14. Bounded multi-round deliberation — mechanical termination, reserved close
+
+Supersedes D13's **once-per-persona-per-post cycle guard**, which made agent
+conversation impossible by construction (A asks B; B answers; A can never
+respond). Personas can now answer *back* — bounded, convergent, and still with
+no second agent loop. Designed in an adversarial review with Codex
+`gpt-5.6-sol` over this repo plus a literature pass (Anthropic multi-agent +
+context-engineering + evals posts; AutoGen/LangGraph/OpenAI-SDK termination
+models; Du et al. debate; 2025-26 sycophancy studies; τ-bench pass^k). Plan:
+[`plans/2026-07-20-deliberation-and-evals.md`](plans/2026-07-20-deliberation-and-evals.md).
+
+- **Termination is mechanical, never model-dependent.** We deliberately did NOT
+  ship a `DECISION:`-marker protocol: markers depend on model compliance and
+  leak protocol into prose. Instead, a pure scheduler
+  (`app/services/deliberation.py`) enforces: a **decreasing autonomous-run
+  budget** (`AUTONOMOUS_RUN_CAP = 6`; every *attempted* turn spends a slot,
+  errors included; no code path bypasses it — that alone proves termination),
+  a **wave cap** (`DELIBERATION_WAVE_CAP = 3`; debate quality plateaus at ~3
+  rounds), **causal eligibility** (a persona re-runs only when a successful
+  reply mentions it after its most recent turn; requests coalesce per target;
+  a mention of a not-yet-run initial target is satisfied by that turn), and
+  **quiescence** (no mentions = branch done — the human way conversations end).
+- **Reserved close.** With exactly one direct target (the *closer*), one budget
+  slot is held back so advisors can't starve the synthesis turn: an owner
+  synthesizes a final call; the **dispatcher** (sole target) gets a
+  role-consistent wrap-up (recommendation/trade-off/dissent/risks). A closer
+  whose own last successful reply already concluded (no honored mentions)
+  closed *naturally* — the reserve goes unused. Closing-turn mentions are never
+  honored. Multi-target posts claim no owner (bounded conversation +
+  quiescence); teaching `@systemd` to nominate a lead is future work.
+- **Outcome correlation, not transcript scanning.** `_run_turn` reports through
+  an explicit `_TurnSink`; the old `_latest_reply()` scan could resurrect a
+  persona's *older* successful reply after an errored turn and keep delegating
+  from stale content (real bug, regression-tested now).
+- **@ semantics are the highest-risk surface.** An `@handle` is simultaneously
+  prose and scheduler control; once return-turns exist, "I agree with @ken"
+  *spends budget*. The roster note and the seeded prompts now teach: **@ =
+  request-a-turn; plain name = reference**; agreement must add evidence, a
+  consequence, or a sharper formulation (the documented dominant failure mode
+  of agent deliberation is sycophantic rubber-stamping; a centralized close is
+  the architecture most robust to it). The critic's mandate is explicit
+  dissent. Existing DBs keep operator-edited prompts;
+  `python -m scripts.migrate_personas --refresh-prompts` re-stamps *seeded*
+  handles only.
+- **Context bloat.** The caps are the primary control (multi-agent ≈ 15× chat
+  tokens; spend explains ~80 % of outcome variance). Additionally a persona's
+  **own successful past replies are filtered from its delta**
+  (`transcript.own_successful`) — its resumed session already remembers them;
+  its own `[error: …]` markers stay visible (a failed turn may not exist in
+  the session at all; hiding the marker hides the failure). Advisor nudges ask
+  for one ~150-word contribution; wave/budget state lives in the per-turn
+  nudge, never the system suffix.
+- **Deliberately cut (YAGNI until measured):** per-room cap presets, typed
+  decision extraction, `[no-decision]` status messages, auto-`/compact`,
+  persisted deliberation aggregates, MockHarness callback scripting.
+- **Consequences:** deliberation turns stream/persist/isolate exactly like all
+  turns (same `aclose()` chain). `MockHarness.script_replies()` provides
+  per-turn scripted variation (queue per substring; exhaustion raises).
+  Evals: three tiers gate the behavior (unit invariants + scenario sims per
+  PR at zero tokens; nightly LLM-judged fresh transcripts, report-only until
+  calibrated) — see [`../evals/README.md`](../evals/README.md) and NFR-EV1..3.

@@ -107,6 +107,58 @@ async def test_last_prompt_when_no_calls_is_none() -> None:
     assert h.last_prompt is None
 
 
+async def test_script_replies_pops_one_reply_per_matching_call_in_order() -> None:
+    h = MockHarness()
+    h.script_replies("→ @arch]", "first: @back look at this", "second: closing it out")
+    t1 = "".join(
+        e.text for e in await _collect(h.run(_spec("[Me → @arch]: go"))) if isinstance(e, TextDelta)
+    )
+    t2 = "".join(
+        e.text
+        for e in await _collect(h.run(_spec("[Ken → @arch]: pushback")))
+        if isinstance(e, TextDelta)
+    )
+    assert "first: @back look at this" == t1
+    assert "second: closing it out" == t2
+
+
+async def test_script_replies_exhaustion_raises_loudly() -> None:
+    h = MockHarness()
+    h.script_replies("→ @arch]", "only one reply")
+    await _collect(h.run(_spec("[Me → @arch]: go")))
+    with pytest.raises(HarnessError, match="exhausted"):
+        await _collect(h.run(_spec("[Me → @arch]: again")))
+
+
+async def test_script_runs_queues_event_lists_and_exceptions() -> None:
+    h = MockHarness()
+    h.script_runs(
+        "→ @arch]",
+        [TextDelta(text="ok"), RunDone(session_id="s-1")],
+        HarnessError("simulated mid-run failure"),
+    )
+    first = await _collect(h.run(_spec("[Me → @arch]: go")))
+    assert isinstance(first[-1], RunDone) and first[-1].session_id == "s-1"
+    with pytest.raises(HarnessError, match="simulated mid-run failure"):
+        await _collect(h.run(_spec("[Me → @arch]: again")))
+
+
+async def test_script_replies_and_script_reply_keys_still_ambiguity_check() -> None:
+    h = MockHarness()
+    h.script_reply("persona-A", "A-REPLY")
+    h.script_replies("persona-B", "B-REPLY")
+    with pytest.raises(HarnessError):
+        await _collect(h.run(_spec("prompt with persona-A and persona-B")))
+
+
+async def test_script_replies_auto_appends_run_done() -> None:
+    h = MockHarness()
+    h.script_replies("→ @arch]", "hello")
+    events = await _collect(h.run(_spec("[Me → @arch]: go")))
+    assert isinstance(events[-1], RunDone)
+    assert events[-1].session_id
+
+
 async def test_send_command_supported_emits_events() -> None:
     h = MockHarness()
     events = await _collect(h.send_command("mock-1", "/compact"))

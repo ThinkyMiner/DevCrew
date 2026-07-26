@@ -1,0 +1,69 @@
+# CI: every push/PR runs the zero-token quality gates — unit + integration +
+# scenario-sim tests (all on MockHarness; AGENTS.md §5 forbids real CLIs here),
+# lint, format, strict types, frontend unit tests, and the eval PIPELINE
+# health check (evals.run_live --mock, which also enforces the hard
+# deliberation-cap invariants end-to-end).
+#
+# The live LLM-judged eval tier (evals/README.md, tier 3) needs authenticated
+# claude/codex CLIs, which hosted runners don't have. It runs via
+# workflow_dispatch on a self-hosted runner (or locally) and is report-only
+# until the rubric is calibrated — see evals/README.md.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      live_evals:
+        description: "Also run live evals (requires self-hosted runner with authenticated CLIs)"
+        type: boolean
+        default: false
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Format
+        run: ruff format --check .
+      - name: Types (strict)
+        run: |
+          mypy app
+          mypy evals
+      - name: Tests (unit + integration + sims, MockHarness only)
+        run: pytest -q
+      - name: Eval pipeline health (zero tokens, hard invariants enforced)
+        run: python -m evals.run_live --mock --out /tmp/eval-ci
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Frontend unit tests
+        run: node --test tests/js/*.test.mjs
+
+  live-evals:
+    # Real-CLI transcript generation + LLM judging. Opt-in: needs a runner
+    # with authenticated `claude`/`codex` CLIs (self-hosted or local `act`).
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.live_evals }}
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Generate fresh transcripts (real CLIs)
+        run: python -m evals.run_live --out evals/out/ci-${{ github.run_id }}
+      - name: Judge (3 trials per dimension, report-only until calibrated)
+        run: python -m evals.judge evals/out/ci-${{ github.run_id }} --trials 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: evals/out/ci-${{ github.run_id }}/report.*

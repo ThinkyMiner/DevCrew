@@ -1,6 +1,8 @@
-"""Persona-to-persona delegation: a persona's reply that @-mentions another
-persona hands that persona a turn (auto-adding them to the room if needed),
-bounded by depth/run caps and a once-per-post guard. Per-room toggle.
+"""Persona-to-persona delegation basics: a persona's reply that @-mentions
+another persona hands that persona a turn (auto-adding them to the room if
+needed), bounded by the D14 deliberation scheduler (autonomous-run budget +
+wave cap + reserved close — see test_deliberation.py for the full matrix).
+Per-room toggle.
 
 All backends are MockHarness. Replies are scripted by the unique ``→ @<handle>]``
 substring that appears in each persona's own prompt, so a script keys to exactly
@@ -104,6 +106,39 @@ async def test_reply_mentioning_member_triggers_delegated_run(env):
 
 
 @pytest.mark.asyncio
+async def test_roster_lists_callable_non_member_teammates(env):
+    # Regression: a persona's injected roster must list the whole ADDABLE team it
+    # can pull in (mentions resolve globally + auto-add), not just current room
+    # members. A fresh room auto-adds ONLY @systemd, so a members-only roster was
+    # empty — and the dispatcher, told "only tag @handles in your roster, never
+    # invent teammates", then had no one to call.
+    repos, orch = env["repos"], env["orch"]
+    room = repos["room"].create(Room(name="R"))
+    _persona(repos, room.id, "Dispatcher", "systemd", Provider.CLAUDE)  # sole member
+    _persona(repos, room.id, "Architect", "arch", Provider.CLAUDE, member=False)
+    _persona(repos, room.id, "Backend", "back", Provider.CODEX, member=False)
+    # A template is not an addable teammate: it must never appear in the roster.
+    repos["persona"].create(
+        Persona(name="Tmpl", handle="tmpl", provider=Provider.CLAUDE, model="m", is_template=True)
+    )
+
+    await _drain(
+        orch.post_message(
+            room.id, author=env["me"], text="@systemd plan it", reply_mode=ReplyMode.SEQUENTIAL
+        )
+    )
+
+    # systemd's wave-0 turn (first CLAUDE call) must carry a roster naming the
+    # callable non-member teammates in its system prompt.
+    sys_prompt = env["mock_a"].calls[0].system_prompt
+    assert "# Your team" in sys_prompt
+    assert "@arch" in sys_prompt
+    assert "@back" in sys_prompt
+    assert "@systemd" not in sys_prompt  # never lists itself
+    assert "@tmpl" not in sys_prompt  # templates are not addable teammates
+
+
+@pytest.mark.asyncio
 async def test_delegation_auto_adds_non_member_then_runs(env):
     repos, orch = env["repos"], env["orch"]
     room = repos["room"].create(Room(name="R"))
@@ -124,18 +159,21 @@ async def test_delegation_auto_adds_non_member_then_runs(env):
 
 
 @pytest.mark.asyncio
-async def test_delegation_respects_depth_cap(env):
-    # arch(0) -> back(1) -> crit(2) -> dave(3, blocked by depth cap of 2).
+async def test_delegation_chain_runs_within_wave_cap(env):
+    # arch(wave 0) -> back(w1) -> crit(w2) -> dave(w3); eve would be wave 4,
+    # past DELIBERATION_WAVE_CAP, so it never runs even though dave tagged it.
     repos, orch = env["repos"], env["orch"]
     room = repos["room"].create(Room(name="R"))
     _persona(repos, room.id, "Architect", "arch", Provider.CLAUDE)
     _persona(repos, room.id, "Backend", "back", Provider.CODEX)
     _persona(repos, room.id, "Critic", "crit", Provider.CLAUDE)
     _persona(repos, room.id, "Dave", "dave", Provider.CODEX)
-    env["mock_a"].script_reply("→ @arch]", "next @back")
+    _persona(repos, room.id, "Eve", "eve", Provider.CLAUDE)
+    env["mock_a"].script_reply("→ @arch]", "next @back")  # also reused as the forced close
     env["mock_b"].script_reply("→ @back]", "next @crit")
     env["mock_a"].script_reply("→ @crit]", "next @dave")
-    env["mock_b"].script_reply("→ @dave]", "the end")
+    env["mock_b"].script_reply("→ @dave]", "next @eve")
+    env["mock_a"].script_reply("→ @eve]", "SHOULD-NEVER-RUN")
 
     await _drain(
         orch.post_message(
@@ -146,13 +184,14 @@ async def test_delegation_respects_depth_cap(env):
     handles_that_replied = {
         repos["persona"].get(m.author_ref).handle for m in _persona_messages(repos, room.id)
     }
-    assert {"arch", "back", "crit"} <= handles_that_replied
-    assert "dave" not in handles_that_replied  # depth 3 blocked
+    assert {"arch", "back", "crit", "dave"} <= handles_that_replied
+    assert "eve" not in handles_that_replied  # wave 4 blocked
 
 
 @pytest.mark.asyncio
-async def test_delegation_respects_run_cap(env):
-    # arch tags 8 personas; only 6 delegated runs are allowed per post.
+async def test_delegation_fanout_bounded_by_budget_with_reserved_close(env):
+    # arch tags 8 personas; budget 6 minus the reserved closing slot => 5 run,
+    # then arch takes the forced closing turn.
     repos, orch = env["repos"], env["orch"]
     room = repos["room"].create(Room(name="R"))
     _persona(repos, room.id, "Architect", "arch", Provider.CLAUDE)
@@ -161,7 +200,7 @@ async def test_delegation_respects_run_cap(env):
         h = f"b{i}"
         _persona(repos, room.id, f"B{i}", h, Provider.CODEX)
         tags.append(f"@{h}")
-    env["mock_a"].script_reply("→ @arch]", "everyone: " + " ".join(tags))
+    env["mock_a"].script_replies("→ @arch]", "everyone: " + " ".join(tags), "WRAP")
     # bN use default mock replies.
 
     await _drain(
@@ -175,12 +214,14 @@ async def test_delegation_respects_run_cap(env):
         for m in _persona_messages(repos, room.id)
         if repos["persona"].get(m.author_ref).handle != "arch"
     ]
-    assert len(delegated) == 6  # capped
+    assert len(delegated) == 5  # budget 6, one slot reserved for the close
+    assert _persona_messages(repos, room.id)[-1].content == "WRAP"
 
 
 @pytest.mark.asyncio
-async def test_persona_invoked_at_most_once_per_post(env):
-    # arch -> back -> (back tags arch, but arch already ran => no re-invoke, no loop).
+async def test_mutual_mentions_terminate_at_caps(env):
+    # arch and back tag each other every turn; the conversation is real
+    # (each runs more than once) but strictly bounded — no loop.
     repos, orch = env["repos"], env["orch"]
     room = repos["room"].create(Room(name="R"))
     _persona(repos, room.id, "Architect", "arch", Provider.CLAUDE)
@@ -194,8 +235,9 @@ async def test_persona_invoked_at_most_once_per_post(env):
         )
     )
 
-    assert len(env["mock_a"].calls) == 1  # architect ran once, not re-invoked
-    assert len(env["mock_b"].calls) == 1
+    # wave 0: arch; w1: back; w2: arch; w3: back; then arch's forced close.
+    assert len(env["mock_a"].calls) == 3
+    assert len(env["mock_b"].calls) == 2
 
 
 @pytest.mark.asyncio

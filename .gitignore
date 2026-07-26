@@ -31,3 +31,4 @@ data-dev/
 
 # Tooling caches
 .codetree/
+evals/out/

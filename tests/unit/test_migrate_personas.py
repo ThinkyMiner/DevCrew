@@ -137,3 +137,38 @@ def test_migrate_is_idempotent(db: Database) -> None:
     assert len(handles) == len(set(handles))  # no dup systemd / no dup handles
     assert len(personas.list()) == n1
     assert personas.get_by_handle("architect").name == "Ada"  # type: ignore[union-attr]
+
+
+def test_refresh_prompts_restamps_seeded_handles_only(db: Database) -> None:
+    from app.services.persona_seed import DEFAULT_PERSONAS, ensure_default_personas
+    from scripts.migrate_personas import refresh_seed_prompts
+
+    personas = PersonaRepo(db)
+    ensure_default_personas(personas)
+    # simulate a pre-D14 install: an old prompt on a seeded handle...
+    db.execute(
+        "UPDATE persona SET system_prompt = 'OLD PROMPT' WHERE handle = 'architect'",
+    )
+    # ...and an operator-created persona that must never be touched.
+    custom = personas.create(
+        Persona(
+            name="Mine", handle="mine", provider=Provider.CLAUDE, model="m", system_prompt="CUSTOM"
+        )
+    )
+
+    count = refresh_seed_prompts(db)
+
+    assert count >= 1
+    spec = next(s for s in DEFAULT_PERSONAS if s.handle == "architect")
+    row = db.query("SELECT system_prompt FROM persona WHERE handle = 'architect'")[0]
+    assert row["system_prompt"] == spec.system_prompt
+    assert personas.get(custom.id).system_prompt == "CUSTOM"
+
+
+def test_refresh_prompts_is_idempotent(db: Database) -> None:
+    from app.services.persona_seed import ensure_default_personas
+    from scripts.migrate_personas import refresh_seed_prompts
+
+    ensure_default_personas(PersonaRepo(db))
+    refresh_seed_prompts(db)
+    assert refresh_seed_prompts(db) == 0  # second run: nothing left to restamp

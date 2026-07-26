@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections import deque
+from collections.abc import AsyncIterator, Sequence
 
 from app.domain.errors import HarnessError
 from app.domain.events import RunDone, StreamEvent, TextDelta, Usage
@@ -33,6 +34,7 @@ class MockHarness:
 
     def __init__(self, script: dict[str, list[StreamEvent]] | None = None) -> None:
         self._script: dict[str, list[StreamEvent]] = dict(script or {})
+        self._queues: dict[str, deque[list[StreamEvent] | Exception]] = {}
         self.calls: list[RunSpec] = []
         self._counter = 0
 
@@ -45,6 +47,29 @@ class MockHarness:
         ``TextDelta(text)`` followed by an auto-allocated ``RunDone``.
         """
         self._script[substring] = [TextDelta(text=text)]
+
+    def script_replies(self, substring: str, *texts: str) -> None:
+        """Script an ordered QUEUE of text replies for ``substring``.
+
+        Each matching run pops and emits the next reply (as one ``TextDelta``
+        plus an auto ``RunDone``); a matching run after the queue is exhausted
+        raises :class:`HarnessError` loudly — a test that runs a persona more
+        times than it scripted is a test bug, never a silent repeat. This is
+        what multi-round deliberation tests use to give one persona different
+        replies on successive turns.
+        """
+        self.script_runs(substring, *([TextDelta(text=t)] for t in texts))
+
+    def script_runs(self, substring: str, *runs: Sequence[StreamEvent] | Exception) -> None:
+        """Low-level sibling of :meth:`script_replies`: queue full event lists
+        and/or exceptions. A queued ``Exception`` is RAISED when its turn comes,
+        simulating a mid-run harness failure (timeout, crash) on exactly that
+        call. Deliberately takes literal sequences, not callbacks — scripted
+        tests must stay auditable data, not little procedural agents.
+        """
+        queue = self._queues.setdefault(substring, deque())
+        for run in runs:
+            queue.append(run if isinstance(run, Exception) else list(run))
 
     @property
     def last_prompt(self) -> str | None:
@@ -74,15 +99,36 @@ class MockHarness:
         return self._next_session_id()
 
     def _scripted_for(self, prompt: str) -> list[StreamEvent] | None:
-        matches = [substring for substring in self._script if substring in prompt]
+        """Resolve the scripted stream for ``prompt`` across BOTH script stores.
+
+        Static scripts (``script_reply``) and queued scripts (``script_replies``
+        / ``script_runs``) share one namespace: a prompt matching more than one
+        key — of either kind — is ambiguous and raises. A queued match consumes
+        its next entry; exhaustion and queued exceptions raise loudly.
+        """
+        matches = sorted(
+            {s for s in self._script if s in prompt} | {s for s in self._queues if s in prompt}
+        )
         if len(matches) > 1:
             raise HarnessError(
                 "ambiguous mock script match: prompt contains multiple scripted "
-                f"substrings {sorted(matches)!r} — refusing to silently pick one"
+                f"substrings {matches!r} — refusing to silently pick one"
             )
-        if matches:
-            return self._script[matches[0]]
-        return None
+        if not matches:
+            return None
+        key = matches[0]
+        if key in self._script:
+            return self._script[key]
+        queue = self._queues[key]
+        if not queue:
+            raise HarnessError(
+                f"mock script queue exhausted for substring {key!r}: the persona ran "
+                "more times than the test scripted — script more replies or fix the test"
+            )
+        entry = queue.popleft()
+        if isinstance(entry, Exception):
+            raise entry
+        return entry
 
     async def run(self, spec: RunSpec) -> AsyncIterator[StreamEvent]:
         """Emit a scripted stream or the default prompt-referencing stream.

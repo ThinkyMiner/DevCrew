@@ -25,6 +25,17 @@ When set to `yes`, PRs run through the same labels and states as issues, using t
 
 GitHub shares one number space across issues and PRs, so a bare `#42` may be either — resolve with `gh pr view 42` and fall back to `gh issue view 42`.
 
+## Issue-first change gate
+
+Every change session must start with a tracking issue (AGENTS.md §4b). For
+Claude Code this is automated: hooks in `.claude/settings.json` run
+`scripts/hooks/issue_gate.sh`, which logs each prompt, files an
+`agent-session`-labeled issue before the session's first in-repo file
+modification, and syncs later prompts as comments. If `gh` is authenticated
+but creation fails the edit is BLOCKED; if `gh` is absent/unauthenticated the
+session proceeds without an issue (noted once). Other agents follow the same
+rule manually.
+
 ## When a skill says "publish to the issue tracker"
 
 Create a GitHub issue.

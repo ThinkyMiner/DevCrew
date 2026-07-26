@@ -294,7 +294,7 @@ async def test_real_subprocess_big_valid_json_line_parses() -> None:
     # we raised the StreamReader limit.
     big_text = "y" * 200000
     line = json.dumps({"type": "text", "text": big_text, "session_id": "sess-big"})
-    child = "import sys\n" f"sys.stdout.write({line!r} + '\\n')\n" "sys.exit(0)\n"
+    child = f"import sys\nsys.stdout.write({line!r} + '\\n')\nsys.exit(0)\n"
     events = await asyncio.wait_for(_collect(_run_real(_child_spawn(child))), timeout=5.0)
     text_events = [e for e in events if isinstance(e, TextDelta)]
     assert len(text_events) == 1

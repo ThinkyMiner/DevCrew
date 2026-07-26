@@ -91,10 +91,10 @@ def render_delta(
     """Render an already-sliced sequence of messages as attributed lines.
 
     A message directed at this persona (via ``@<persona_handle>`` or
-    ``@everyone``) is rendered with the ``→ @<handle>`` form; the persona's own
-    past messages are still included, attributed by name. Returns ``""`` for an
-    empty slice. Slicing is the caller's job (see :func:`delta_messages`) so the
-    slice can be reused without re-deriving it.
+    ``@everyone``) is rendered with the ``→ @<handle>`` form. Returns ``""``
+    for an empty slice. Slicing — and the D14 own-message filtering (see
+    :func:`own_successful`) — is the caller's job (see :func:`assemble_context`)
+    so the slice can be reused without re-deriving it.
     """
     if not delta:
         return ""
@@ -142,6 +142,23 @@ def render_quotes(quoted_messages: Sequence[Message], name_of: NameResolver) -> 
     return "\n\n".join(blocks)
 
 
+def own_successful(message: Message, persona_id: str | None) -> bool:
+    """True when ``message`` is this persona's own successful past reply.
+
+    Own successful replies are filtered from the delta (D14): the persona's
+    resumed harness session already contains what it said, so re-sending it is
+    systematic duplication. Its own error markers are NOT filtered — a failed
+    turn may be absent from the harness session entirely, and hiding the marker
+    would hide the failure (fail loud).
+    """
+    return (
+        persona_id is not None
+        and message.author_kind is AuthorKind.PERSONA
+        and message.author_ref == persona_id
+        and not message.is_error_marker()
+    )
+
+
 def assemble_context(
     messages: Sequence[Message],
     last_seen_id: str | None,
@@ -151,6 +168,7 @@ def assemble_context(
     author: HumanAuthor,
     new_text: str,
     name_of: NameResolver,
+    persona_id: str | None = None,
 ) -> str:
     """Assemble a persona's full prompt from raw transcript inputs.
 
@@ -167,8 +185,12 @@ def assemble_context(
     this function pure. A stale/foreign ``last_seen_id`` raises
     :class:`TranscriptError` (no silent full-history fallback). Section order is
     owned by :func:`app.services.prompt.assemble_prompt`.
+
+    When ``persona_id`` is given, the persona's own successful past replies are
+    dropped from the delta (see :func:`own_successful`) — its resumed session
+    already remembers them; explicit quotes of them still render.
     """
-    delta = delta_messages(messages, last_seen_id)
+    delta = [m for m in delta_messages(messages, last_seen_id) if not own_successful(m, persona_id)]
     seen_ids = {m.id for m in delta}
     quotes_to_render = [m for m in quoted_messages if m.id not in seen_ids]
     return assemble_prompt(

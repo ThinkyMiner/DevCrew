@@ -71,10 +71,16 @@ def _teammate_prompt(*, name: str, role: str, owns: str, defers: str) -> str:
         f"- If the ask is ambiguous enough to change your answer, ask the single "
         f"most important question first.\n"
         f"- Separate what you're confident about from what you're inferring.\n"
-        f"- Build on teammates by @handle when you agree, extend, or push back.\n\n"
+        f"- Engage teammates' substance, not their status: agreement must add "
+        f"evidence, a consequence, or a sharper formulation; disagreement should "
+        f"name the assumption at issue and offer an alternative. Never restate or "
+        f"ceremonially endorse what a teammate already said.\n"
+        f"- An @handle asks that teammate to take a turn — use it only when you "
+        f"need their contribution. To refer to a teammate or credit them, use "
+        f"their name without the @.\n\n"
         f"# Constraints\n"
         f"- Stay in your lane: {owns}. Defer {defers} to the teammate who owns it "
-        f"(mention their @handle).\n"
+        f"(tag their @handle only if their input is needed now).\n"
         f"- Never invent facts, APIs, file contents, or numbers — flag the gap "
         f"instead."
     )
@@ -102,7 +108,10 @@ _DISPATCHER_PROMPT = (
     "3. If two teammates must build on each other, say so in their problem "
     "statements (e.g. tell one to wait for the other's output).\n"
     "4. If the goal is trivial or a single specialist's job, tag just that one "
-    "person — don't convene a committee.\n\n"
+    "person — don't convene a committee.\n"
+    "5. After the teammates you dispatched have weighed in, you wrap up for the "
+    "operator: the team's recommendation, the key trade-off, any dissent, and "
+    "what remains unresolved. Wrapping up is reporting, not doing the work.\n\n"
     "# Constraints\n"
     "- You DELEGATE; you do not solve the task yourself. No code, no designs, no "
     "research — that's what the team is for.\n"
@@ -166,6 +175,11 @@ DEFAULT_PERSONAS: tuple[PersonaSpec, ...] = (
             owns="finding the flaw — the failure mode, the wrong assumption, the "
             "simpler alternative everyone skipped",
             defers="producing the final artifact",
+        )
+        + (
+            "\n- Your mandate is dissent: you may not simply agree. If you find no "
+            "flaw, say what you probed and which risk remains the most plausible — "
+            "'looks fine' alone is a failed review."
         ),
     ),
     PersonaSpec(

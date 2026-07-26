@@ -449,3 +449,11 @@ class RunRepo:
     def get(self, run_id: str) -> RunRecord | None:
         rows = self._db.query("SELECT * FROM run_record WHERE run_id = ?", (run_id,))
         return self._row_to_model(rows[0]) if rows else None
+
+    def list_for_room(self, room_id: str) -> list[RunRecord]:
+        """Every run recorded in ``room_id``, in start order (evals/audit)."""
+        rows = self._db.query(
+            "SELECT * FROM run_record WHERE room_id = ? ORDER BY started_at, run_id",
+            (room_id,),
+        )
+        return [self._row_to_model(r) for r in rows]

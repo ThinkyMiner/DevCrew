@@ -87,6 +87,24 @@ These exist because the operator's top priorities are **code quality** and
 8. **Update docs with code.** If behavior changes, the PRD/design change in the same
    commit.
 
+## 4b. Issue-first changes (hard requirement when `gh` works)
+
+Every change session must be traceable to a GitHub issue in this repo — the
+operator tracks all change requests (and their prompts) there.
+
+- **Before your first file modification in a session**, create a tracking
+  issue: `gh issue create --title "<the operator's request, first line>"
+  --body "<the request/prompts + branch>" --label agent-session`. Append
+  later prompts/requests from the same session as comments.
+- **Claude Code enforces this automatically** via the hooks in
+  `.claude/settings.json` → `scripts/hooks/issue_gate.sh` (prompts are logged
+  per session; the first in-repo edit files the issue; later prompts sync as
+  comments). Other agents (Codex, humans-in-a-hurry) must do it manually.
+- **If `gh` is authenticated but issue creation fails, do not proceed** —
+  fix it or file manually. **If `gh` is missing/unauthenticated, proceed
+  without** (say so) — the requirement is hard only when the token exists.
+- Scratch files, plan files, and memory writes outside the repo are exempt.
+
 ## 5. Test-driven development is mandatory
 
 - **Write the failing test first**, watch it fail, then implement. This is required,
@@ -122,7 +140,13 @@ pytest -k orchestrator           # focused
 
 # Quality gates (run before declaring work done)
 ruff check . && ruff format --check .
-mypy app
+mypy app && mypy evals
+node --test tests/js/*.test.mjs  # frontend unit tests
+
+# Evals (see evals/README.md; tiers 1-2 are inside pytest already)
+python -m evals.run_live --mock      # eval pipeline health — zero tokens
+python -m evals.run_live             # fresh live transcripts (real CLIs)
+python -m evals.judge evals/out/<ts> # LLM-judged report (report-only)
 ```
 
 ## 7. The error-finding playbook

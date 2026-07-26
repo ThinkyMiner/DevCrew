@@ -345,3 +345,16 @@ def test_deleting_room_cascades(db: Database) -> None:
     assert db.query("SELECT COUNT(*) AS n FROM persona_session")[0]["n"] == 0
     # persona itself survives room deletion
     assert personas.get(p.id) is not None
+
+
+def test_run_list_for_room_in_start_order(db: Database) -> None:
+    repo = RunRepo(db)
+    a = RunRecord(room_id="r1", persona_id="p1", command_redacted="c", usage={})
+    b = RunRecord(room_id="r1", persona_id="p2", command_redacted="c", usage={})
+    other = RunRecord(room_id="r2", persona_id="p1", command_redacted="c", usage={})
+    for rr in (a, b, other):
+        repo.create(rr)
+
+    got = repo.list_for_room("r1")
+    assert [r.run_id for r in got] == [a.run_id, b.run_id]
+    assert repo.list_for_room("empty") == []

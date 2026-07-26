@@ -183,6 +183,30 @@ def _seed_missing(db: Database, report: MigrationReport) -> None:
         report.seeded += 1
 
 
+def refresh_seed_prompts(db: Database) -> int:
+    """Re-stamp SEEDED handles' system prompts with the current canonical specs.
+
+    Opt-in (``--refresh-prompts``): the regular migration deliberately preserves
+    operator edits, but D14 changed the seeded prompts' @-mention semantics
+    ("@ = request a turn", anti-rubber-stamp rules, dispatcher wrap-up duty) and
+    an old prompt actively fights the deliberation scheduler. Only handles that
+    exist in ``DEFAULT_PERSONAS`` are touched; operator-created personas never
+    are. Returns the number of personas updated.
+    """
+    updated = 0
+    with db.transaction():
+        for spec in DEFAULT_PERSONAS:
+            rows = db.query("SELECT system_prompt FROM persona WHERE handle = ?", (spec.handle,))
+            if not rows or rows[0]["system_prompt"] == spec.system_prompt:
+                continue
+            db.execute(
+                "UPDATE persona SET system_prompt = ? WHERE handle = ?",
+                (spec.system_prompt, spec.handle),
+            )
+            updated += 1
+    return updated
+
+
 def _backup(db_path: Path) -> Path:
     """Copy the db (and any WAL/SHM sidecars) next to it with a timestamp suffix."""
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -200,6 +224,12 @@ def main() -> None:
     parser.add_argument("--db", default="data/team.db", help="path to team.db")
     parser.add_argument(
         "--dry-run", action="store_true", help="report what would change, then roll back"
+    )
+    parser.add_argument(
+        "--refresh-prompts",
+        action="store_true",
+        help="also overwrite SEEDED personas' system prompts with the current "
+        "canonical specs (D14 @-semantics); operator-created personas untouched",
     )
     args = parser.parse_args()
 
@@ -229,6 +259,9 @@ def main() -> None:
         else:
             report = migrate(db)
             print(f"[migrate] done: {report.summary()}")
+            if args.refresh_prompts:
+                n = refresh_seed_prompts(db)
+                print(f"[migrate] refreshed seed prompts on {n} persona(s)")
     finally:
         db.close()
 

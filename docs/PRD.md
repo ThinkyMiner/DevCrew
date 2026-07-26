@@ -89,12 +89,26 @@ PRD translates them into concrete requirements.
 - **FR-M6** **Persona-to-persona delegation** (per-room toggle, `delegation_enabled`,
   default on): when a persona's reply `@`-mentions another persona, that persona is
   given a turn (seeing the delegating message via the normal delta). A mentioned
-  non-member is **auto-added** to the room first. Bounded by the orchestrator's caps
-  — delegation **depth** ≤ 2, ≤ **6** delegated turns per operator post, and each
-  persona runs **at most once per post** (cycle guard) — so chains always terminate.
-  When enabled, each run's system prompt carries the live teammate roster (handles +
-  jobs). No second agent loop: delegation reuses the same `@`-routing and turn
-  machinery as operator posts. See [`DECISIONS.md`](DECISIONS.md) D13.
+  non-member is **auto-added** to the room first. When enabled, each run's system
+  prompt carries the live teammate roster (handles + jobs) plus the collaboration
+  protocol (@ = request-a-turn; agreement must add substance). No second agent
+  loop: delegation reuses the same `@`-routing and turn machinery as operator
+  posts. Bounds are FR-M7's (which superseded the original depth/once-per-post
+  caps). See [`DECISIONS.md`](DECISIONS.md) D13/D14.
+- **FR-M7** **Multi-round deliberation** (D14): mentioned personas may answer
+  *back*, giving bounded conversations that converge on an outcome. Termination is
+  **mechanical, never model-dependent**: a decreasing **autonomous-run budget**
+  (≤ 6 attempted turns per post, errors included), a **wave cap** (≤ 3 mention
+  waves), **causal eligibility** (a persona re-runs only when a successful reply
+  mentions it after its last turn; requests **coalesce** per target), and quiescence
+  (a reply with no mentions ends its branch). When the post has exactly **one
+  direct target**, one budget slot is **reserved for its closing turn** — an
+  owner synthesizes a final call; the dispatcher (sole target) wraps up
+  recommendation/trade-off/dissent/risks; a closer that already concluded
+  naturally skips the forced close. Closing-turn mentions are never honored.
+  Turn outcomes are correlated explicitly (never re-scanned from the transcript).
+  A persona's own successful past replies are **filtered from its delta** (its
+  resumed session already has them); its own `[error: …]` markers are not.
 
 ### 4.5 Multi-reply behavior
 
@@ -156,6 +170,17 @@ PRD translates them into concrete requirements.
 - **NFR-5 Debuggability.** Layered architecture, typed boundaries (Pydantic), and
   the "fail loud, fail located" rule make any error fast to trace.
 - **NFR-6 Python 3.12+** (developed against the local 3.14).
+- **NFR-EV1 Tiered evaluation.** Deliberation behavior is evaluated in three
+  tiers (see [`../evals/README.md`](../evals/README.md)): deterministic
+  invariants + scenario sims on MockHarness gate every PR at zero token cost;
+  fresh live transcripts graded by a per-dimension LLM judge run
+  nightly/on-demand, report-only until the rubric is human-calibrated.
+- **NFR-EV2 Safety is never a rubric item.** Termination caps are mechanical
+  hard invariants checked in code (`evals/run_live.py`, tier-1 tests); a
+  quality score can never compensate for a cap violation.
+- **NFR-EV3 CI.** `.github/workflows/ci.yml` runs lint, format, strict types,
+  the full MockHarness test suite (incl. sims), the eval pipeline-health run,
+  and the frontend unit tests on every push/PR.
 
 ## 6. Architecture overview
 
