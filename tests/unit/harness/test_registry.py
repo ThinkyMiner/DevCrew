@@ -8,6 +8,7 @@ from app.harness.base import AgentBackend
 from app.harness.claude import ClaudeHarness
 from app.harness.codex import CodexHarness
 from app.harness.mock import MockHarness
+from app.harness.process import DEFAULT_TIMEOUT
 from app.harness.registry import (
     BackendRegistry,
     build_default_registry,
@@ -90,6 +91,27 @@ def test_build_default_registry_defaults_to_no_scratch() -> None:
     claude = reg.get_backend(Provider.CLAUDE)
     assert isinstance(claude, ClaudeHarness)
     assert claude._scratch_dir is None
+
+
+def test_build_default_registry_threads_timeout_into_adapters() -> None:
+    # The per-run wall-clock cap must reach BOTH real adapters so a long persona
+    # turn isn't killed at the conservative default.
+    reg = build_default_registry(timeout=36000.0)
+    claude = reg.get_backend(Provider.CLAUDE)
+    codex = reg.get_backend(Provider.CODEX)
+    assert isinstance(claude, ClaudeHarness)
+    assert isinstance(codex, CodexHarness)
+    assert claude._timeout == 36000.0
+    assert codex._timeout == 36000.0
+
+
+def test_build_default_registry_timeout_defaults_to_process_default() -> None:
+    # With no override, adapters keep the shared conservative DEFAULT_TIMEOUT
+    # (only the app composition root raises it via Settings.harness_timeout).
+    reg = build_default_registry()
+    claude = reg.get_backend(Provider.CLAUDE)
+    assert isinstance(claude, ClaudeHarness)
+    assert claude._timeout == DEFAULT_TIMEOUT
 
 
 def test_backends_declare_supported_models() -> None:

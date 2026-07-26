@@ -119,7 +119,9 @@ def create_app(
     backend_registry = (
         registry
         if registry is not None
-        else build_default_registry(str(settings.resolved_scratch_dir))
+        else build_default_registry(
+            str(settings.resolved_scratch_dir), timeout=settings.harness_timeout
+        )
     )
 
     persona_service = PersonaService(persona_repo)
